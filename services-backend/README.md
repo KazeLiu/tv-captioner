@@ -1,6 +1,6 @@
 # TV Captioner Windows 后端
 
-当前方向：
+TV Captioner Windows 后端负责接收安卓端上传的音频片段，在本地完成语音识别和翻译，并返回字幕结果。
 
 ```text
 Android/TV 前端采集直播音频片段 -> Windows 后端接收 -> 本地 ASR -> 本地 GGUF 翻译 -> 返回字幕
@@ -21,13 +21,13 @@ Android/TV 前端采集直播音频片段 -> Windows 后端接收 -> 本地 ASR 
 
 ## 启动
 
-给普通用户使用时，优先发便携版或安装包。便携版会内置 Python 运行时、后端依赖和 GGUF 运行库，用户不需要手动安装 `llama-cpp-python`。构建方式见：
+推荐使用便携版或安装包。便携版会内置 Python 运行时、后端依赖和 GGUF 运行库，不需要手动安装 `llama-cpp-python`。构建方式见：
 
 ```text
 打包说明.md
 ```
 
-源码目录适合开发机调试：
+源码目录也可以直接启动：
 
 第一次双击：
 
@@ -43,10 +43,10 @@ Android/TV 前端采集直播音频片段 -> Windows 后端接收 -> 本地 ASR 
 
 ## ASR 模型
 
-网页里的“打开模型页”会打开 Hugging Face 页面。你手动下载后，把模型文件放到对应目录：
+网页里的“打开模型页”会打开 Hugging Face 页面。下载后，把模型文件放到对应目录：
 
 ```text
-D:\code\tv-captioner\services-backend\models\asr\large-v2
+services-backend\models\asr\large-v2
 ```
 
 页面会列出常用 faster-whisper / distil-whisper ASR 模型，包括多语言、英语专用 `.en`、large、turbo、distil 系列。建议先用 `large-v2` 做质量基线，再用 `large-v3-turbo` 或 distil 系列测实时延迟。
@@ -59,18 +59,18 @@ config.json
 tokenizer.json 或 vocabulary.json
 ```
 
-如果你选择的是 whisper.cpp 的单个 `.bin` / `.gguf` 文件，校验会提示不兼容；后续需要接 whisper.cpp 运行时才能直接用这种文件。
+当前直接支持 faster-whisper / CTranslate2 目录，暂不支持 whisper.cpp 的单个 `.bin` / `.gguf` 文件。
 
 ## 翻译模型
 
 翻译不会用 Ollama。当前使用内置的 `llama-cpp-python` 直接加载 GGUF 模型，更接近 PotPlayer 调 `whisper.cpp` 的模式：下载模型文件，然后程序直接使用。
 
-普通用户不需要安装 GGUF 运行库；发给用户的便携版/安装包会内置运行库。用户只需要准备 `.gguf` 模型文件。
+便携版/安装包会内置 GGUF 运行库，只需要准备 `.gguf` 模型文件。
 
 网页“翻译”标签页会列出 Qwen GGUF 模型。下载 `.gguf` 文件后，放到对应目录，例如：
 
 ```text
-D:\code\tv-captioner\services-backend\models\translate\qwen2.5-3b-instruct-gguf
+services-backend\models\translate\qwen2.5-3b-instruct-gguf
 ```
 
 也可以在“翻译”标签页添加自定义翻译模型。这里和 ASR 不一样：翻译模型当前按 GGUF 方案走，所以可以选择单个 `.gguf` 文件，也可以选择包含 `.gguf` 文件的目录。校验会检查路径是否存在、后缀是否为 `.gguf`，以及目录里是否真的有模型文件。

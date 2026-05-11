@@ -1,8 +1,8 @@
 # TV Captioner
 
-TV Captioner 是一个面向电视/安卓设备的实时字幕实验项目：安卓端采集短音频片段，发送到 Windows 后端；后端在本地完成语音识别和翻译，再把字幕结果返回给前端显示。
+TV Captioner 是一个面向电视/安卓设备的实时字幕工具：安卓端采集短音频片段，发送到 Windows 后端；后端在本地完成语音识别和翻译，再把字幕结果返回给前端显示。
 
-当前项目还处在早期版本，重点是跑通本地 ASR、GGUF 翻译模型和安卓悬浮字幕的完整链路。
+它适合在局域网内使用 Windows 电脑承担模型推理，安卓手机、平板或电视端负责采集声音并显示悬浮字幕。
 
 ## 项目结构
 
@@ -17,7 +17,7 @@ tv-captioner/
 - Android 客户端
   - 配置 Windows 后端地址和端口。
   - 选择源语言、目标语言、ASR 模型和翻译模型。
-  - 通过麦克风采集短音频片段。
+  - 通过麦克风或系统播放声音采集短音频片段。
   - 调用后端接口获取原文和翻译字幕。
   - 使用系统悬浮窗显示字幕，并支持调节字幕大小、背景和位置。
 
@@ -60,16 +60,14 @@ http://127.0.0.1:8765
 
 ### 2. 准备模型
 
-仓库不包含模型文件。请按后端网页提示手动下载并放到对应目录：
+请按后端网页提示下载模型，并放到对应目录：
 
 ```text
 services-backend/models/asr/
 services-backend/models/translate/
 ```
 
-ASR 推荐先用 faster-whisper / CTranslate2 格式模型做测试。翻译模型使用 GGUF 文件，例如 Qwen Instruct 的 GGUF 版本。
-
-模型文件通常很大，不建议直接提交到 Git。当前 `.gitignore` 已经排除了 `services-backend/models/`。
+ASR 推荐使用 faster-whisper / CTranslate2 格式模型。翻译模型使用 GGUF 文件，例如 Qwen Instruct 的 GGUF 版本。
 
 ### 3. 构建 Android 客户端
 
@@ -91,7 +89,7 @@ APK 输出位置：
 client-android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Android 首次使用悬浮字幕时，需要授予麦克风、通知和“显示在其他应用上层”权限。
+Android 首次使用悬浮字幕时，需要授予音频录制、通知和“显示在其他应用上层”权限。
 
 ## 开发环境
 
@@ -113,9 +111,8 @@ Android 端主要配置：
 ## 重要说明
 
 - 后端不负责拉直播流，也不做直播切片。
-- 当前版本不依赖 FFmpeg，也不依赖 Ollama。
-- 安卓端当前使用麦克风采集环境声音；如果后续要直接采集系统内声音，需要接入 Android MediaProjection。
-- `services-backend/data/`、`services-backend/models/`、构建产物、日志和本机配置不会提交到仓库。
+- 不依赖 FFmpeg，也不依赖 Ollama。
+- 安卓端支持麦克风采集，也支持 Android 10+ 的系统播放声音采集；受系统和播放 App 限制，部分受保护内容可能无法采集。
 
 ## 更多文档
 
@@ -123,4 +120,3 @@ Android 端主要配置：
 - [Windows 后端说明](services-backend/README.md)
 - [快速部署说明](services-backend/快速部署说明.md)
 - [打包说明](services-backend/打包说明.md)
-
