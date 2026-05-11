@@ -333,6 +333,13 @@ select {
   border-left-width: 5px;
 }
 
+.log-section-title {
+  color: #33403b;
+  font-size: 13px;
+  font-weight: 800;
+  margin-top: 8px;
+}
+
 .log-row.info {
   border-left-color: #2b6f97;
 }
@@ -390,6 +397,39 @@ select {
   overflow-wrap: anywhere;
 }
 
+.log-steps {
+  display: grid;
+  gap: 8px;
+}
+
+.log-step {
+  display: grid;
+  grid-template-columns: minmax(130px, auto) minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  border-top: 1px solid #ede6dc;
+  padding-top: 8px;
+}
+
+.log-step span {
+  color: #68736d;
+  font-size: 12px;
+}
+
+.log-step strong {
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.log-step.warning strong {
+  color: #8f5107;
+}
+
+.log-step.error strong {
+  color: #9b2f25;
+}
+
 .action-link {
   display: inline-grid;
   min-height: 40px;
@@ -405,6 +445,7 @@ select {
   .topbar,
   .model,
   .check-item,
+  .log-step,
   .custom-model-form {
     align-items: stretch;
     grid-template-columns: 1fr;

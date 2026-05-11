@@ -290,24 +290,110 @@ function renderLogs(logs) {
     logList.innerHTML = `<div class="tile"><strong>暂无日志</strong><div class="meta">接口调用、音频接收、转写和翻译结果会显示在这里。</div></div>`;
     return;
   }
+
+  const audioGroups = new Map();
+  const otherLogs = [];
   for (const item of logs) {
-    const level = item.level || "info";
-    const time = item.timestamp ? new Date(item.timestamp).toLocaleString() : "";
-    const details = item.details && Object.keys(item.details).length
-      ? `<pre>${escapeHtml(JSON.stringify(item.details, null, 2))}</pre>`
-      : "";
-    logList.insertAdjacentHTML(
-      "beforeend",
-      `<article class="log-row ${escapeHtml(level)}">
-        <div class="log-head">
-          <span class="log-level">${escapeHtml(logLevelLabels[level] || level)}</span>
-          <span class="meta">${escapeHtml(time)} · ${escapeHtml(item.category || "system")}</span>
-        </div>
-        <strong>${escapeHtml(item.message || "")}</strong>
-        ${details}
-      </article>`,
-    );
+    const requestId = item.details?.requestId;
+    const isAudioFlow = requestId && ["audio", "asr", "translation"].includes(item.category);
+    if (!isAudioFlow) {
+      otherLogs.push(item);
+      continue;
+    }
+    if (!audioGroups.has(requestId)) {
+      audioGroups.set(requestId, []);
+    }
+    audioGroups.get(requestId).push(item);
   }
+
+  const groupedLogs = [...audioGroups.entries()]
+    .map(([requestId, items]) => ({
+      requestId,
+      items: items.sort((a, b) => Date.parse(a.timestamp || 0) - Date.parse(b.timestamp || 0)),
+      latestAt: Math.max(...items.map((item) => Date.parse(item.timestamp || 0) || 0)),
+    }))
+    .sort((a, b) => b.latestAt - a.latestAt);
+
+  if (groupedLogs.length) {
+    logList.insertAdjacentHTML("beforeend", `<div class="log-section-title">音频处理日志</div>`);
+    for (const group of groupedLogs) {
+      renderAudioLogGroup(group);
+    }
+  }
+
+  if (otherLogs.length) {
+    logList.insertAdjacentHTML("beforeend", `<div class="log-section-title">接口和系统日志</div>`);
+    for (const item of otherLogs) {
+      renderFlatLog(item);
+    }
+  }
+}
+
+function renderAudioLogGroup(group) {
+  const level = group.items.some((item) => item.level === "error")
+    ? "error"
+    : group.items.some((item) => item.level === "warning")
+      ? "warning"
+      : "info";
+  const received = group.items.find((item) => item.category === "audio") || group.items[0];
+  const time = formatLogTime(received.timestamp);
+  const ip = received.details?.clientIp || "-";
+  const steps = group.items.map(renderAudioStep).join("");
+  logList.insertAdjacentHTML(
+    "beforeend",
+    `<article class="log-row audio-block ${escapeHtml(level)}">
+      <div class="log-head">
+        <span class="log-level">${escapeHtml(logLevelLabels[level] || level)}</span>
+        <span class="meta">${escapeHtml(time)} · IP ${escapeHtml(ip)}</span>
+      </div>
+      <strong>音频处理 ${escapeHtml(group.requestId.slice(0, 8))}</strong>
+      <div class="log-steps">${steps}</div>
+    </article>`,
+  );
+}
+
+function renderAudioStep(item) {
+  const details = item.details || {};
+  const time = formatLogTime(item.timestamp);
+  if (item.level === "error") {
+    return `<div class="log-step error"><span>${escapeHtml(time)}</span><strong>处理失败：${escapeHtml(details.error || item.message || "未知错误")}</strong></div>`;
+  }
+  if (item.category === "audio") {
+    return `<div class="log-step"><span>${escapeHtml(time)}</span><strong>收到音频</strong></div>`;
+  }
+  if (item.category === "asr") {
+    const sourceText = details.sourceText || "未识别到文本";
+    return `<div class="log-step ${item.level === "warning" ? "warning" : ""}"><span>${escapeHtml(time)}</span><strong>音频转写为「${escapeHtml(sourceText)}」</strong></div>`;
+  }
+  if (item.category === "translation" && details.translatedText != null) {
+    const sourceText = details.sourceText || "";
+    const translatedText = details.translatedText || "";
+    return `<div class="log-step"><span>${escapeHtml(time)}</span><strong>「${escapeHtml(sourceText)}」翻译为「${escapeHtml(translatedText)}」</strong></div>`;
+  }
+  return `<div class="log-step"><span>${escapeHtml(time)}</span><strong>${escapeHtml(item.message || "")}</strong></div>`;
+}
+
+function renderFlatLog(item) {
+  const level = item.level || "info";
+  const time = formatLogTime(item.timestamp);
+  const details = item.details && Object.keys(item.details).length
+    ? `<pre>${escapeHtml(JSON.stringify(item.details, null, 2))}</pre>`
+    : "";
+  logList.insertAdjacentHTML(
+    "beforeend",
+    `<article class="log-row ${escapeHtml(level)}">
+      <div class="log-head">
+        <span class="log-level">${escapeHtml(logLevelLabels[level] || level)}</span>
+        <span class="meta">${escapeHtml(time)} · ${escapeHtml(item.category || "system")}</span>
+      </div>
+      <strong>${escapeHtml(item.message || "")}</strong>
+      ${details}
+    </article>`,
+  );
+}
+
+function formatLogTime(timestamp) {
+  return timestamp ? new Date(timestamp).toLocaleString() : "";
 }
 
 function renderTaskList(target, tasks, emptyText) {

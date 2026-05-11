@@ -350,6 +350,7 @@ async def receive_live_chunk(
 
 @app.post("/api/audio/translate")
 def translate_audio_now(
+    request: Request,
     file: Annotated[UploadFile | None, File()] = None,
     source_path: Annotated[str | None, Form()] = None,
     source_language: Annotated[str, Form()] = "",
@@ -368,13 +369,15 @@ def translate_audio_now(
     requested_language = source_language.strip()
     requested_language = None if not requested_language or requested_language == "auto" else requested_language
     target = target_language.strip()
+    client_ip = request.client.host if request.client else ""
 
     log_event(
         "info",
-        "收到同步音频翻译请求",
-        category="api",
+        "收到音频",
+        category="audio",
         details={
             "requestId": request_id,
+            "clientIp": client_ip,
             "label": label,
             "sourceLanguage": requested_language or "auto",
             "targetLanguage": target,
@@ -384,21 +387,8 @@ def translate_audio_now(
         },
     )
 
-    progress_state = {"last": None}
-
     def update(**changes):
-        message = changes.get("message")
-        progress = changes.get("progress")
-        bucket = None if progress is None else int(float(progress) * 10)
-        progress_key = (message, bucket)
-        if message and progress_key != progress_state["last"]:
-            progress_state["last"] = progress_key
-            log_event(
-                "info",
-                f"同步音频翻译进度：{message}",
-                category="task",
-                details={"requestId": request_id, "progress": progress},
-            )
+        pass
 
     try:
         asr_result = transcribe_media(
