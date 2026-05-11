@@ -1,0 +1,45 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local environment
+.env
+.env.*
+*.local
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Backend runtime data
+services-backend/data/
+services-backend/models/
+services-backend/*.log
+services-backend/server*.out.log
+services-backend/server*.err.log
+
+# Backend build artifacts
+services-backend/build/
+services-backend/dist/
+services-backend/*.spec
+
+# Android / Gradle
+client-android/.gradle/
+client-android/build/
+client-android/**/build/
+client-android/local.properties
+
+# Generated packages
+*.apk
+*.aab
+*.exe
+*.msi
+*.zip

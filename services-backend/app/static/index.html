@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TV Captioner Backend</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar">
+        <div>
+          <h1>TV Captioner Backend</h1>
+          <p>本地转写、翻译和字幕输出控制台</p>
+        </div>
+        <button id="refreshBtn" type="button">刷新状态</button>
+      </section>
+
+      <div class="tabs" role="tablist" aria-label="功能区">
+        <button class="tab active" type="button" data-tab="transcribe">转写</button>
+        <button class="tab" type="button" data-tab="translate">翻译</button>
+        <button class="tab" type="button" data-tab="logs">日志</button>
+      </div>
+
+      <section id="tab-transcribe" class="tab-panel active">
+        <section class="band">
+          <div class="section-title">
+            <h2>转写环境</h2>
+            <div id="transcriptionReadyBadge" class="ready-badge pending">检查中</div>
+          </div>
+          <div id="transcriptionChecklist" class="checklist"></div>
+        </section>
+
+        <section class="band">
+          <h2>ASR 模型</h2>
+          <form id="customModelForm" class="custom-model-form">
+            <label>
+              自定义模型标识
+              <input name="key" type="text" placeholder="potplayer-large-v2" />
+            </label>
+            <label>
+              显示名称
+              <input name="label" type="text" placeholder="PotPlayer large-v2" />
+            </label>
+            <label class="wide">
+              模型目录
+              <input name="path" type="text" placeholder="D:\PotPlayer\Models\large-v2" />
+            </label>
+            <label class="wide">
+              备注
+              <input name="description" type="text" placeholder="从 PotPlayer 模型目录添加" />
+            </label>
+            <div class="actions">
+              <button type="submit">添加自定义模型</button>
+              <button type="button" id="validateModelBtn">校验路径</button>
+            </div>
+            <div id="customModelResult" class="form-result"></div>
+          </form>
+          <div id="modelList" class="model-list"></div>
+        </section>
+
+        <section class="band">
+          <h2>转写任务</h2>
+          <form id="jobForm" class="job-form">
+            <label>
+              媒体文件
+              <input name="file" type="file" accept="audio/*,video/*" />
+            </label>
+            <label>
+              或本机路径
+              <input name="source_path" type="text" placeholder="D:\media\sample.mp4" />
+            </label>
+            <div class="grid">
+              <label>
+                ASR 模型
+                <select name="asr_model">
+                  <option value="large-v2">large-v2（推荐基线）</option>
+                  <option value="tiny">tiny（多语言，极小）</option>
+                  <option value="tiny.en">tiny.en（英语专用，极小）</option>
+                  <option value="base">base（多语言，基础）</option>
+                  <option value="base.en">base.en（英语专用，基础）</option>
+                  <option value="small">small（多语言，小型）</option>
+                  <option value="small.en">small.en（英语专用，小型）</option>
+                  <option value="medium">medium（多语言，中型）</option>
+                  <option value="medium.en">medium.en（英语专用，中型）</option>
+                  <option value="large-v1">large-v1</option>
+                  <option value="large-v3">large-v3</option>
+                  <option value="large-v3-turbo">large-v3-turbo</option>
+                  <option value="distil-small.en">distil-small.en</option>
+                  <option value="distil-medium.en">distil-medium.en</option>
+                  <option value="distil-large-v2">distil-large-v2</option>
+                  <option value="distil-large-v3">distil-large-v3</option>
+                </select>
+              </label>
+              <label>
+                源语言
+                <select name="source_language">
+                  <option value="">auto</option>
+                  <option value="ja">ja 日语</option>
+                  <option value="ko">ko 韩语</option>
+                  <option value="ar">ar 阿拉伯语</option>
+                  <option value="en">en 英语</option>
+                </select>
+              </label>
+              <label>
+                设备
+                <select name="device">
+                  <option value="auto">auto</option>
+                  <option value="cuda">cuda</option>
+                  <option value="cpu">cpu</option>
+                </select>
+              </label>
+              <label>
+                计算类型
+                <select name="compute_type">
+                  <option value="auto">auto</option>
+                  <option value="float16">float16</option>
+                  <option value="int8_float16">int8_float16</option>
+                  <option value="int8">int8</option>
+                </select>
+              </label>
+            </div>
+            <div class="actions">
+              <button type="submit">开始处理</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="band">
+          <h2>转写任务队列</h2>
+          <div id="taskList" class="task-list"></div>
+        </section>
+      </section>
+
+      <section id="tab-translate" class="tab-panel">
+        <section class="band">
+          <div class="section-title">
+            <h2>翻译环境</h2>
+            <div id="translationReadyBadge" class="ready-badge pending">检查中</div>
+          </div>
+          <div id="translationChecklist" class="checklist"></div>
+        </section>
+
+        <section class="band">
+          <h2>Qwen 翻译模型</h2>
+          <form id="customTranslationModelForm" class="custom-model-form">
+            <label>
+              自定义模型标识
+              <input name="key" type="text" placeholder="qwen-local-7b" />
+            </label>
+            <label>
+              显示名称
+              <input name="label" type="text" placeholder="本地 Qwen 7B" />
+            </label>
+            <label class="wide">
+              GGUF 文件或目录
+              <input name="path" type="text" placeholder="D:\Models\Qwen\qwen2.5-7b-instruct-q4_k_m.gguf" />
+            </label>
+            <label class="wide">
+              备注
+              <input name="description" type="text" placeholder="从本机已有模型添加" />
+            </label>
+            <div class="actions">
+              <button type="submit">添加自定义翻译模型</button>
+              <button type="button" id="validateTranslationModelBtn">校验路径</button>
+            </div>
+            <div id="customTranslationModelResult" class="form-result"></div>
+          </form>
+          <div id="translationModelList" class="model-list"></div>
+        </section>
+
+        <section class="band">
+          <h2>翻译测试</h2>
+          <form id="translationTestForm" class="job-form">
+            <label>
+              媒体文件
+              <input name="file" type="file" accept="audio/*,video/*" />
+            </label>
+            <label>
+              或本机路径
+              <input name="source_path" type="text" placeholder="D:\media\sample.mp4" />
+            </label>
+            <div class="grid">
+              <label>
+                ASR 模型
+                <select name="asr_model">
+                  <option value="large-v2">large-v2（推荐基线）</option>
+                  <option value="tiny">tiny（多语言，极小）</option>
+                  <option value="tiny.en">tiny.en（英语专用，极小）</option>
+                  <option value="base">base（多语言，基础）</option>
+                  <option value="base.en">base.en（英语专用，基础）</option>
+                  <option value="small">small（多语言，小型）</option>
+                  <option value="small.en">small.en（英语专用，小型）</option>
+                  <option value="medium">medium（多语言，中型）</option>
+                  <option value="medium.en">medium.en（英语专用，中型）</option>
+                  <option value="large-v1">large-v1</option>
+                  <option value="large-v3">large-v3</option>
+                  <option value="large-v3-turbo">large-v3-turbo</option>
+                  <option value="distil-small.en">distil-small.en</option>
+                  <option value="distil-medium.en">distil-medium.en</option>
+                  <option value="distil-large-v2">distil-large-v2</option>
+                  <option value="distil-large-v3">distil-large-v3</option>
+                </select>
+              </label>
+              <label>
+                翻译模型
+                <select name="translation_model">
+                  <option value="qwen2.5-1.5b-instruct-gguf">Qwen2.5 1.5B（轻量）</option>
+                  <option value="qwen2.5-3b-instruct-gguf">Qwen2.5 3B（推荐入门）</option>
+                  <option value="qwen2.5-7b-instruct-gguf">Qwen2.5 7B（质量基线）</option>
+                  <option value="qwen3-4b-gguf">Qwen3 4B（新一代轻量）</option>
+                  <option value="qwen3-8b-gguf">Qwen3 8B（新一代质量基线）</option>
+                </select>
+              </label>
+              <label>
+                原文语言
+                <select name="source_language">
+                  <option value="">auto</option>
+                  <option value="ja">ja 日语</option>
+                  <option value="ko">ko 韩语</option>
+                  <option value="ar">ar 阿拉伯语</option>
+                  <option value="en">en 英语</option>
+                </select>
+              </label>
+              <label>
+                目标语言
+                <select name="target_language">
+                  <option value="Chinese">中文</option>
+                  <option value="English">English</option>
+                  <option value="Japanese">日本語</option>
+                  <option value="Korean">한국어</option>
+                  <option value="Arabic">العربية</option>
+                </select>
+              </label>
+              <label>
+                设备
+                <select name="device">
+                  <option value="auto">auto</option>
+                  <option value="cuda">cuda</option>
+                  <option value="cpu">cpu</option>
+                </select>
+              </label>
+              <label>
+                计算类型
+                <select name="compute_type">
+                  <option value="auto">auto</option>
+                  <option value="float16">float16</option>
+                  <option value="int8_float16">int8_float16</option>
+                  <option value="int8">int8</option>
+                </select>
+              </label>
+              <label>
+                上下文长度
+                <input name="n_ctx" type="number" min="1024" step="512" value="4096" />
+              </label>
+              <label>
+                GPU 层数
+                <input name="n_gpu_layers" type="number" min="0" step="1" value="0" />
+              </label>
+            </div>
+            <div class="actions">
+              <button type="submit">开始翻译测试</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="band">
+          <h2>翻译任务队列</h2>
+          <div id="translationTaskList" class="task-list"></div>
+        </section>
+      </section>
+
+      <section id="tab-logs" class="tab-panel">
+        <section class="band">
+          <div class="section-title">
+            <h2>运行日志</h2>
+            <label class="compact-control">
+              等级
+              <select id="logLevelFilter">
+                <option value="">全部</option>
+                <option value="info">info</option>
+                <option value="warning">warning</option>
+                <option value="error">error</option>
+              </select>
+            </label>
+          </div>
+          <div id="logList" class="log-list"></div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
