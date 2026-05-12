@@ -3,9 +3,13 @@ package com.tvcaptioner.client;
 import android.Manifest;
 import android.content.Context;
 import android.content.pm.PackageManager;
+import android.media.AudioAttributes;
 import android.media.AudioFormat;
+import android.media.AudioPlaybackCaptureConfiguration;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
+import android.media.projection.MediaProjection;
+import android.os.Build;
 import android.os.Process;
 
 import java.io.ByteArrayOutputStream;
@@ -26,13 +30,15 @@ final class AudioCaptureLoop {
 
     private final Context context;
     private final Listener listener;
+    private final MediaProjection mediaProjection;
     private volatile boolean running;
     private Thread thread;
     private AudioRecord recorder;
 
-    AudioCaptureLoop(Context context, Listener listener) {
+    AudioCaptureLoop(Context context, Listener listener, MediaProjection mediaProjection) {
         this.context = context.getApplicationContext();
         this.listener = listener;
+        this.mediaProjection = mediaProjection;
     }
 
     void start() {
@@ -74,16 +80,10 @@ final class AudioCaptureLoop {
 
         try {
             if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-                listener.onError("还没有麦克风权限");
+                listener.onError("还没有音频录制权限");
                 return;
             }
-            recorder = new AudioRecord(
-                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                    SAMPLE_RATE,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT,
-                    bufferSize
-            );
+            recorder = createRecorder(settings, bufferSize);
             if (recorder.getState() != AudioRecord.STATE_INITIALIZED) {
                 listener.onError("录音初始化失败");
                 return;
@@ -116,10 +116,49 @@ final class AudioCaptureLoop {
                 }
             }
         } catch (SecurityException exc) {
-            listener.onError("麦克风权限被系统拒绝");
+            listener.onError("音频录制权限被系统拒绝");
+        } catch (IllegalStateException exc) {
+            if (exc.getMessage() != null && !exc.getMessage().trim().isEmpty()) {
+                listener.onError(cleanError(exc.getMessage()));
+            }
         } finally {
             stop();
         }
+    }
+
+    private AudioRecord createRecorder(AppSettings settings, int bufferSize) {
+        if (!settings.useSystemAudio()) {
+            return new AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                    SAMPLE_RATE,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    bufferSize
+            );
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            listener.onError("系统声音采集需要 Android 10 或更高版本");
+            throw new IllegalStateException("系统声音采集需要 Android 10 或更高版本");
+        }
+        if (mediaProjection == null) {
+            listener.onError("还没有系统声音采集授权");
+            throw new IllegalStateException("还没有系统声音采集授权");
+        }
+
+        AudioFormat format = new AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(SAMPLE_RATE)
+                .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                .build();
+        AudioPlaybackCaptureConfiguration config = new AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
+                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                .build();
+        return new AudioRecord.Builder()
+                .setAudioFormat(format)
+                .setBufferSizeInBytes(bufferSize)
+                .setAudioPlaybackCaptureConfig(config)
+                .build();
     }
 
     private static String cleanError(String message) {

@@ -5,12 +5,15 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.media.projection.MediaProjection;
+import android.media.projection.MediaProjectionManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
@@ -28,11 +31,21 @@ import android.widget.TextView;
 
 public class CaptionOverlayService extends Service implements AudioCaptureLoop.Listener {
     static final String ACTION_STOP = "com.tvcaptioner.client.STOP";
+    static final String EXTRA_PROJECTION_RESULT_CODE = "projection_result_code";
+    static final String EXTRA_PROJECTION_DATA = "projection_data";
 
     private static final String CHANNEL_ID = "caption_overlay";
     private static final int NOTIFICATION_ID = 101;
+    private static final long OVERLAY_REFRESH_MS = 1200L;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final Runnable overlayRefresh = new Runnable() {
+        @Override
+        public void run() {
+            refreshOverlayWindow();
+            mainHandler.postDelayed(this, OVERLAY_REFRESH_MS);
+        }
+    };
 
     private WindowManager windowManager;
     private WindowManager.LayoutParams overlayParams;
@@ -40,6 +53,7 @@ public class CaptionOverlayService extends Service implements AudioCaptureLoop.L
     private TextView statusView;
     private TextView captionView;
     private AudioCaptureLoop captureLoop;
+    private MediaProjection mediaProjection;
     private String lastCaption = "字幕会显示在这里";
 
     @Override
@@ -67,11 +81,30 @@ public class CaptionOverlayService extends Service implements AudioCaptureLoop.L
             removeOverlay();
         }
         showOverlay();
+        startOverlayRefresh();
         if (captureLoop == null) {
-            captureLoop = new AudioCaptureLoop(this, this);
+            AppSettings settings = AppSettings.load(this);
+            if (settings.useSystemAudio()) {
+                mediaProjection = createMediaProjection(intent);
+                if (mediaProjection == null) {
+                    postState("需要授权", "请回到设置页获取系统声音权限");
+                    stopSelf();
+                    return START_NOT_STICKY;
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    mediaProjection.registerCallback(new MediaProjection.Callback() {
+                        @Override
+                        public void onStop() {
+                            postState("需要授权", "系统声音权限已取消");
+                            stopSelf();
+                        }
+                    }, mainHandler);
+                }
+            }
+            captureLoop = new AudioCaptureLoop(this, this, mediaProjection);
             captureLoop.start();
         }
-        return START_STICKY;
+        return AppSettings.load(this).useSystemAudio() ? START_NOT_STICKY : START_STICKY;
     }
 
     @Override
@@ -80,7 +113,12 @@ public class CaptionOverlayService extends Service implements AudioCaptureLoop.L
             captureLoop.stop();
             captureLoop = null;
         }
+        if (mediaProjection != null) {
+            mediaProjection.stop();
+            mediaProjection = null;
+        }
         removeOverlay();
+        stopOverlayRefresh();
         super.onDestroy();
     }
 
@@ -177,15 +215,20 @@ public class CaptionOverlayService extends Service implements AudioCaptureLoop.L
         int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                 : WindowManager.LayoutParams.TYPE_PHONE;
+        int flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
         overlayParams = new WindowManager.LayoutParams(
                 width,
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 type,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                        | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
+                flags,
                 PixelFormat.TRANSLUCENT
         );
         overlayParams.gravity = Gravity.TOP | Gravity.START;
+        overlayParams.setTitle("TV Captioner Overlay");
         DisplayMetrics metrics = getResources().getDisplayMetrics();
         overlayParams.x = Math.max(0, (metrics.widthPixels - width) * settings.positionXPercent / 100);
         overlayParams.y = Math.max(dp(8), (metrics.heightPixels - dp(160)) * settings.positionYPercent / 100);
@@ -203,6 +246,35 @@ public class CaptionOverlayService extends Service implements AudioCaptureLoop.L
         }
         overlayView = null;
         overlayParams = null;
+    }
+
+    private void startOverlayRefresh() {
+        mainHandler.removeCallbacks(overlayRefresh);
+        mainHandler.postDelayed(overlayRefresh, OVERLAY_REFRESH_MS);
+    }
+
+    private void stopOverlayRefresh() {
+        mainHandler.removeCallbacks(overlayRefresh);
+    }
+
+    private void refreshOverlayWindow() {
+        if (overlayView == null || overlayParams == null) {
+            if (Settings.canDrawOverlays(this)) {
+                showOverlay();
+            }
+            return;
+        }
+        try {
+            overlayView.setVisibility(View.VISIBLE);
+            overlayView.bringToFront();
+            windowManager.updateViewLayout(overlayView, overlayParams);
+        } catch (IllegalArgumentException exc) {
+            overlayView = null;
+            overlayParams = null;
+            if (Settings.canDrawOverlays(this)) {
+                showOverlay();
+            }
+        }
     }
 
     private void postState(String status, String caption) {
@@ -286,6 +358,19 @@ public class CaptionOverlayService extends Service implements AudioCaptureLoop.L
         channel.setDescription("TV Captioner 正在录音并显示悬浮字幕");
         NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         manager.createNotificationChannel(channel);
+    }
+
+    private MediaProjection createMediaProjection(Intent intent) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || intent == null) {
+            return null;
+        }
+        Intent data = intent.getParcelableExtra(EXTRA_PROJECTION_DATA);
+        int resultCode = intent.getIntExtra(EXTRA_PROJECTION_RESULT_CODE, Activity.RESULT_CANCELED);
+        if (data == null || resultCode != Activity.RESULT_OK) {
+            return null;
+        }
+        MediaProjectionManager manager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+        return manager == null ? null : manager.getMediaProjection(resultCode, data);
     }
 
     private void openOverlaySettings() {

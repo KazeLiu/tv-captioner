@@ -5,9 +5,12 @@ import android.content.SharedPreferences;
 
 final class AppSettings {
     static final String PREFS = "tv_captioner_settings";
+    static final String AUDIO_SOURCE_MICROPHONE = "microphone";
+    static final String AUDIO_SOURCE_SYSTEM = "system";
 
     private static final String KEY_HOST = "host";
     private static final String KEY_PORT = "port";
+    private static final String KEY_AUDIO_SOURCE = "audio_source";
     private static final String KEY_SOURCE_LANGUAGE = "source_language";
     private static final String KEY_TARGET_LANGUAGE = "target_language";
     private static final String KEY_ASR_MODEL = "asr_model";
@@ -21,6 +24,7 @@ final class AppSettings {
 
     final String host;
     final int port;
+    final String audioSource;
     final String sourceLanguage;
     final String targetLanguage;
     final String asrModel;
@@ -35,6 +39,7 @@ final class AppSettings {
     AppSettings(
             String host,
             int port,
+            String audioSource,
             String sourceLanguage,
             String targetLanguage,
             String asrModel,
@@ -48,6 +53,7 @@ final class AppSettings {
     ) {
         this.host = host;
         this.port = port;
+        this.audioSource = audioSource;
         this.sourceLanguage = sourceLanguage;
         this.targetLanguage = targetLanguage;
         this.asrModel = asrModel;
@@ -69,6 +75,7 @@ final class AppSettings {
         return new AppSettings(
                 prefs.getString(KEY_HOST, "192.168.1.100"),
                 prefs.getInt(KEY_PORT, 8765),
+                prefs.getString(KEY_AUDIO_SOURCE, AUDIO_SOURCE_MICROPHONE),
                 prefs.getString(KEY_SOURCE_LANGUAGE, "auto"),
                 prefs.getString(KEY_TARGET_LANGUAGE, "Chinese"),
                 prefs.getString(KEY_ASR_MODEL, "large-v2"),
@@ -87,6 +94,7 @@ final class AppSettings {
                 .edit()
                 .putString(KEY_HOST, host.trim())
                 .putInt(KEY_PORT, port)
+                .putString(KEY_AUDIO_SOURCE, audioSource)
                 .putString(KEY_SOURCE_LANGUAGE, sourceLanguage)
                 .putString(KEY_TARGET_LANGUAGE, targetLanguage)
                 .putString(KEY_ASR_MODEL, asrModel)
@@ -98,6 +106,10 @@ final class AppSettings {
                 .putInt(KEY_POSITION_X, clamp(positionXPercent, 0, 100))
                 .putInt(KEY_POSITION_Y, clamp(positionYPercent, 0, 100))
                 .apply();
+    }
+
+    boolean useSystemAudio() {
+        return AUDIO_SOURCE_SYSTEM.equals(audioSource);
     }
 
     private static int clamp(int value, int min, int max) {

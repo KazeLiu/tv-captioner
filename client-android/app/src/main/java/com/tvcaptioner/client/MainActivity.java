@@ -7,6 +7,7 @@ import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.media.projection.MediaProjectionManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -33,9 +34,11 @@ import java.util.List;
 public class MainActivity extends Activity {
     private static final int REQ_AUDIO = 11;
     private static final int REQ_NOTIFICATIONS = 12;
+    private static final int REQ_MEDIA_PROJECTION = 13;
 
     private EditText hostInput;
     private EditText portInput;
+    private Spinner audioSourceSpinner;
     private Spinner asrModelSpinner;
     private Spinner translationModelSpinner;
     private Spinner sourceSpinner;
@@ -46,6 +49,10 @@ public class MainActivity extends Activity {
     private TextView opacityLabel;
     private TextView positionLabel;
     private TextView statusView;
+    private TextView audioPermissionStatus;
+    private TextView overlayPermissionStatus;
+    private TextView notificationPermissionStatus;
+    private TextView systemAudioPermissionStatus;
     private FrameLayout previewFrame;
     private TextView previewCaption;
     private SeekBar chunkSeek;
@@ -55,6 +62,10 @@ public class MainActivity extends Activity {
     private LanguageOption[] sourceOptions;
     private LanguageOption[] targetOptions;
     private CaptionColorOption[] colorOptions;
+    private AudioSourceOption[] audioSourceOptions;
+    private Intent projectionData;
+    private int projectionResultCode = RESULT_CANCELED;
+    private boolean startAfterProjectionGrant;
     private int previewXPercent = 50;
     private int previewYPercent = 82;
 
@@ -64,6 +75,7 @@ public class MainActivity extends Activity {
         sourceOptions = LanguageOption.sourceOptions();
         targetOptions = LanguageOption.targetOptions();
         colorOptions = CaptionColorOption.options();
+        audioSourceOptions = AudioSourceOption.options();
         buildUi();
         loadSettingsIntoUi();
         refreshPermissionStatus();
@@ -85,6 +97,29 @@ public class MainActivity extends Activity {
                 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
             startCaptions();
         }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_MEDIA_PROJECTION) {
+            return;
+        }
+        if (resultCode == RESULT_OK && data != null) {
+            projectionResultCode = resultCode;
+            projectionData = data;
+            statusView.setText("系统声音权限已授权");
+            if (startAfterProjectionGrant) {
+                startAfterProjectionGrant = false;
+                startCaptions();
+            }
+        } else {
+            startAfterProjectionGrant = false;
+            projectionResultCode = RESULT_CANCELED;
+            projectionData = null;
+            statusView.setText("系统声音权限未授权");
+        }
+        refreshPermissionStatus();
     }
 
     private void buildUi() {
@@ -114,6 +149,14 @@ public class MainActivity extends Activity {
         );
         subtitleParams.bottomMargin = dp(18);
         root.addView(subtitle, subtitleParams);
+
+        root.addView(permissionPanel());
+
+        LinearLayout audioPanel = panel();
+        audioPanel.addView(sectionTitle("音频来源"));
+        audioSourceSpinner = audioSourceSpinner(audioSourceOptions);
+        audioPanel.addView(field("采集声音", audioSourceSpinner));
+        root.addView(audioPanel);
 
         LinearLayout serverPanel = panel();
         serverPanel.addView(sectionTitle("后端"));
@@ -182,6 +225,7 @@ public class MainActivity extends Activity {
         AppSettings settings = AppSettings.load(this);
         hostInput.setText(settings.host);
         portInput.setText(String.valueOf(settings.port));
+        audioSourceSpinner.setSelection(AudioSourceOption.indexOf(audioSourceOptions, settings.audioSource));
         sourceSpinner.setSelection(LanguageOption.indexOf(sourceOptions, settings.sourceLanguage));
         targetSpinner.setSelection(LanguageOption.indexOf(targetOptions, settings.targetLanguage));
         colorSpinner.setSelection(CaptionColorOption.indexOf(colorOptions, settings.backgroundColor));
@@ -254,6 +298,7 @@ public class MainActivity extends Activity {
             return null;
         }
 
+        AudioSourceOption audioSource = (AudioSourceOption) audioSourceSpinner.getSelectedItem();
         LanguageOption source = (LanguageOption) sourceSpinner.getSelectedItem();
         LanguageOption target = (LanguageOption) targetSpinner.getSelectedItem();
         AppSettings saved = AppSettings.load(this);
@@ -267,6 +312,7 @@ public class MainActivity extends Activity {
         return new AppSettings(
                 host,
                 port,
+                audioSource.value,
                 source.value,
                 target.value,
                 asrModel,
@@ -289,7 +335,7 @@ public class MainActivity extends Activity {
 
         if (!hasAudioPermission()) {
             requestPermissions(new String[] {Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
-            statusView.setText("请允许麦克风权限");
+            statusView.setText("请允许音频录制权限");
             return;
         }
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
@@ -302,8 +348,22 @@ public class MainActivity extends Activity {
             openOverlaySettings();
             return;
         }
+        if (settings.useSystemAudio()) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                statusView.setText("系统播放声音采集需要 Android 10 或更高版本");
+                return;
+            }
+            if (projectionData == null || projectionResultCode != RESULT_OK) {
+                requestSystemAudioPermission(true);
+                return;
+            }
+        }
 
         Intent intent = new Intent(this, CaptionOverlayService.class);
+        if (settings.useSystemAudio()) {
+            intent.putExtra(CaptionOverlayService.EXTRA_PROJECTION_RESULT_CODE, projectionResultCode);
+            intent.putExtra(CaptionOverlayService.EXTRA_PROJECTION_DATA, projectionData);
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent);
         } else {
@@ -350,15 +410,35 @@ public class MainActivity extends Activity {
     }
 
     private void refreshPermissionStatus() {
-        String overlay = Settings.canDrawOverlays(this) ? "悬浮窗已授权" : "悬浮窗未授权";
-        String mic = hasAudioPermission() ? "麦克风已授权" : "麦克风未授权";
+        String audio = hasAudioPermission() ? "已授权" : "未授权";
+        String overlay = Settings.canDrawOverlays(this) ? "已授权" : "未授权";
+        String notification = hasNotificationPermission() ? "已授权" : "未授权";
+        String systemAudio = projectionData != null && projectionResultCode == RESULT_OK ? "已授权（本次运行）" : "未授权";
+
+        if (audioPermissionStatus != null) {
+            audioPermissionStatus.setText(audio);
+        }
+        if (overlayPermissionStatus != null) {
+            overlayPermissionStatus.setText(overlay);
+        }
+        if (notificationPermissionStatus != null) {
+            notificationPermissionStatus.setText(notification);
+        }
+        if (systemAudioPermissionStatus != null) {
+            systemAudioPermissionStatus.setText(systemAudio);
+        }
         if (statusView != null) {
-            statusView.setText(overlay + " · " + mic);
+            statusView.setText("悬浮窗" + overlay + " · 音频录制" + audio);
         }
     }
 
     private boolean hasAudioPermission() {
         return checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private boolean hasNotificationPermission() {
+        return Build.VERSION.SDK_INT < 33
+                || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED;
     }
 
     private void openOverlaySettings() {
@@ -368,6 +448,38 @@ public class MainActivity extends Activity {
         );
         startActivity(intent);
         statusView.setText("请允许 TV Captioner 显示在其他应用上层");
+    }
+
+    private void requestSystemAudioPermission(boolean startAfterGrant) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            statusView.setText("系统播放声音采集需要 Android 10 或更高版本");
+            return;
+        }
+        startAfterProjectionGrant = startAfterGrant;
+        MediaProjectionManager manager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+        if (manager == null) {
+            statusView.setText("当前系统不支持系统声音授权");
+            return;
+        }
+        statusView.setText("请在系统弹窗中允许采集播放声音");
+        startActivityForResult(manager.createScreenCaptureIntent(), REQ_MEDIA_PROJECTION);
+    }
+
+    private void clearSystemAudioPermission() {
+        startAfterProjectionGrant = false;
+        projectionResultCode = RESULT_CANCELED;
+        projectionData = null;
+        stopService(new Intent(this, CaptionOverlayService.class));
+        statusView.setText("已取消本次系统声音授权");
+        refreshPermissionStatus();
+    }
+
+    private void openAppSettings() {
+        Intent intent = new Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:" + getPackageName())
+        );
+        startActivity(intent);
     }
 
     private LinearLayout panel() {
@@ -382,6 +494,98 @@ public class MainActivity extends Activity {
         params.bottomMargin = dp(12);
         panel.setLayoutParams(params);
         return panel;
+    }
+
+    private LinearLayout permissionPanel() {
+        LinearLayout panel = panel();
+        panel.addView(sectionTitle("权限"));
+
+        audioPermissionStatus = valueLabel("");
+        panel.addView(permissionRow(
+                "音频录制",
+                "用于读取麦克风，系统声音模式也需要它来创建音频采集器。",
+                audioPermissionStatus,
+                v -> requestPermissions(new String[] {Manifest.permission.RECORD_AUDIO}, REQ_AUDIO),
+                v -> openAppSettings()
+        ));
+
+        overlayPermissionStatus = valueLabel("");
+        panel.addView(permissionRow(
+                "悬浮窗",
+                "用于把实时字幕显示在其他应用或视频画面上层。",
+                overlayPermissionStatus,
+                v -> openOverlaySettings(),
+                v -> openOverlaySettings()
+        ));
+
+        notificationPermissionStatus = valueLabel("");
+        panel.addView(permissionRow(
+                "通知",
+                "用于前台服务运行时展示状态，并提供停止入口。",
+                notificationPermissionStatus,
+                v -> {
+                    if (Build.VERSION.SDK_INT >= 33) {
+                        requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIFICATIONS);
+                    } else {
+                        statusView.setText("当前系统不需要单独获取通知权限");
+                    }
+                },
+                v -> openAppSettings()
+        ));
+
+        systemAudioPermissionStatus = valueLabel("");
+        panel.addView(permissionRow(
+                "系统播放声音",
+                "用于采集其他 App 播放的媒体声音；受系统和播放 App 保护策略限制。",
+                systemAudioPermissionStatus,
+                v -> requestSystemAudioPermission(false),
+                v -> clearSystemAudioPermission()
+        ));
+        return panel;
+    }
+
+    private View permissionRow(
+            String title,
+            String purpose,
+            TextView status,
+            View.OnClickListener grant,
+            View.OnClickListener cancel
+    ) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(0, dp(6), 0, dp(8));
+
+        LinearLayout head = new LinearLayout(this);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+
+        TextView titleView = new TextView(this);
+        titleView.setText(title);
+        titleView.setTextColor(Color.rgb(15, 23, 42));
+        titleView.setTextSize(14);
+        titleView.setTypeface(Typeface.DEFAULT_BOLD);
+        head.addView(titleView, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        head.addView(status);
+        row.addView(head);
+
+        TextView purposeView = new TextView(this);
+        purposeView.setText(purpose);
+        purposeView.setTextColor(Color.rgb(71, 85, 105));
+        purposeView.setTextSize(12);
+        purposeView.setPadding(0, dp(3), 0, dp(6));
+        row.addView(purposeView);
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        Button grantButton = secondaryButton("获取");
+        grantButton.setOnClickListener(grant);
+        Button cancelButton = secondaryButton("取消/管理");
+        cancelButton.setOnClickListener(cancel);
+        LinearLayout.LayoutParams grantParams = new LinearLayout.LayoutParams(0, dp(42), 1);
+        grantParams.rightMargin = dp(8);
+        actions.addView(grantButton, grantParams);
+        actions.addView(cancelButton, new LinearLayout.LayoutParams(0, dp(42), 1));
+        row.addView(actions);
+        return row;
     }
 
     private TextView sectionTitle(String text) {
@@ -456,6 +660,29 @@ public class MainActivity extends Activity {
         spinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
+        return spinner;
+    }
+
+    private Spinner audioSourceSpinner(AudioSourceOption[] options) {
+        Spinner spinner = new Spinner(this);
+        ArrayAdapter<AudioSourceOption> adapter = new ArrayAdapter<>(
+                this,
+                android.R.layout.simple_spinner_item,
+                options
+        );
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinner.setAdapter(adapter);
+        spinner.setBackground(roundRect(Color.rgb(248, 250, 252), dp(8), Color.rgb(203, 213, 225)));
+        spinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                refreshPermissionStatus();
             }
 
             @Override
