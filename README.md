@@ -1,122 +1,159 @@
-# TV Captioner
+# TV Captioner Backend
 
-TV Captioner 是一个面向电视/安卓设备的实时字幕工具：安卓端采集短音频片段，发送到 Windows 后端；后端在本地完成语音识别和翻译，再把字幕结果返回给前端显示。
+TV Captioner Backend 是项目的 Windows 后端服务。它提供网页控制台、本地语音识别、本地 GGUF 翻译、字幕文件输出，以及给外部前端/客户端调用的音频片段接口。
 
-它适合在局域网内使用 Windows 电脑承担模型推理，安卓手机、平板或电视端负责采集声音并显示悬浮字幕。
+```text
+外部前端/客户端采集音频片段 -> 后端接收 -> 本地 ASR -> 本地 GGUF 翻译 -> 返回字幕
+```
+
+当前仓库只保留后端。原 `services-backend` 目录里的内容已经提升到项目根目录，原 Android 客户端目录已移除。后端不负责拉直播流，不做直播切片，不需要 FFmpeg，也不使用 Ollama。
 
 ## 项目结构
 
 ```text
 tv-captioner/
-├── client-android/      # Android 客户端，负责录音、设置后端地址、显示悬浮字幕
-└── services-backend/    # Windows 后端，负责 ASR、翻译、网页控制台和测试接口
+├── app/                 # FastAPI 应用、模型检查、任务和接口实现
+├── app/static/          # 网页控制台静态资源
+├── packaging/           # 安装包配置和打包依赖
+├── run_server.py        # 便携版/安装包入口
+├── setup.ps1            # 创建虚拟环境并安装依赖
+├── start.ps1            # 开发环境启动脚本
+├── build-portable.ps1   # 构建便携版
+└── requirements.txt     # 后端运行依赖
 ```
+
+运行时生成的 `data/`、`models/`、`build/`、`dist/`、日志和 `.spec` 文件都在根目录下，并已被 `.gitignore` 忽略。
 
 ## 当前功能
 
-- Android 客户端
-  - 配置 Windows 后端地址和端口。
-  - 选择源语言、目标语言、ASR 模型和翻译模型。
-  - 通过麦克风或系统播放声音采集短音频片段。
-  - 调用后端接口获取原文和翻译字幕。
-  - 使用系统悬浮窗显示字幕，并支持调节字幕大小、背景和位置。
+- 网页控制台：`http://127.0.0.1:8765`
+- 转写环境监测：ASR 模型状态检查
+- 翻译环境监测：GGUF 翻译模型文件检查
+- 模型按钮只打开网页，不由后端下载
+- 本地文件 ASR 测试
+- 本地文件转写 + 翻译测试，输出原文 SRT、翻译 SRT、双语 SRT 和 JSON
+- 接收外部前端/客户端上传的直播音频片段
+- 日志页面：记录接口调用、音频接收、转写原文、翻译结果、warning 和 error；日志自动保留最近 10 天
 
-- Windows 后端
-  - 提供网页控制台：`http://127.0.0.1:8765`
-  - 检查 ASR 模型和 GGUF 翻译模型状态。
-  - 支持本地音频转写、翻译测试和字幕文件输出。
-  - 接收安卓端上传的直播音频片段。
-  - 使用 `faster-whisper` 做语音识别，使用 `llama-cpp-python` 加载本地 GGUF 翻译模型。
+## 启动
 
-## 快速开始
-
-### 1. 启动 Windows 后端
-
-进入后端目录：
-
-```powershell
-cd services-backend
-```
-
-第一次使用：
-
-```powershell
-.\首次安装并启动.bat
-```
-
-以后启动：
-
-```powershell
-.\启动后端.bat
-```
-
-启动后打开：
+推荐使用便携版或安装包。便携版会内置 Python 运行时、后端依赖和 GGUF 运行库，不需要手动安装 `llama-cpp-python`。构建方式见：
 
 ```text
-http://127.0.0.1:8765
+打包说明.md
 ```
 
-后端默认端口是 `8765`。如果安卓真机要访问后端，手机/电视和 Windows 主机需要在同一个局域网，并在客户端里填写 Windows 主机的局域网 IP，不能填写 `127.0.0.1`。
+源码目录可以直接启动：
 
-### 2. 准备模型
-
-请按后端网页提示下载模型，并放到对应目录：
+第一次双击：
 
 ```text
-services-backend/models/asr/
-services-backend/models/translate/
+首次安装并启动.bat
 ```
 
-ASR 推荐使用 faster-whisper / CTranslate2 格式模型。翻译模型使用 GGUF 文件，例如 Qwen Instruct 的 GGUF 版本。
-
-### 3. 构建 Android 客户端
-
-进入客户端目录：
-
-```powershell
-cd client-android
-```
-
-构建调试包：
-
-```powershell
-.\gradlew.bat assembleDebug
-```
-
-APK 输出位置：
+以后双击：
 
 ```text
-client-android/app/build/outputs/apk/debug/app-debug.apk
+启动后端.bat
 ```
 
-Android 首次使用悬浮字幕时，需要授予音频录制、通知和“显示在其他应用上层”权限。
+## ASR 模型
 
-## 开发环境
+网页里的“打开模型页”会打开 Hugging Face 页面。下载后，把模型文件放到对应目录：
 
-后端主要依赖：
+```text
+models\asr\large-v2
+```
 
-- Python
-- FastAPI
-- faster-whisper
-- llama-cpp-python
-- uvicorn
+页面会列出常用 faster-whisper / distil-whisper ASR 模型，包括多语言、英语专用 `.en`、large、turbo、distil 系列。建议先用 `large-v2` 做质量基线，再用 `large-v3-turbo` 或 distil 系列测实时延迟。
 
-Android 端主要配置：
+如果你已经在 PotPlayer 里下载过模型，可以在网页“自定义模型”里填本地目录。当前后端直接支持的是 faster-whisper / CTranslate2 目录，基本结构需要包含：
 
-- Android Gradle Plugin `7.4.2`
-- `compileSdk 34`
-- `minSdk 26`
-- Java 8
+```text
+model.bin
+config.json
+tokenizer.json 或 vocabulary.json
+```
 
-## 重要说明
+当前直接支持 faster-whisper / CTranslate2 目录，暂不支持 whisper.cpp 的单个 `.bin` / `.gguf` 文件。
 
-- 后端不负责拉直播流，也不做直播切片。
-- 不依赖 FFmpeg，也不依赖 Ollama。
-- 安卓端支持麦克风采集，也支持 Android 10+ 的系统播放声音采集；受系统和播放 App 限制，部分受保护内容可能无法采集。
+## 翻译模型
 
-## 更多文档
+翻译不会用 Ollama。当前使用内置的 `llama-cpp-python` 直接加载 GGUF 模型，更接近 PotPlayer 调 `whisper.cpp` 的模式：下载模型文件，然后程序直接使用。
 
-- [Android 客户端说明](client-android/README.md)
-- [Windows 后端说明](services-backend/README.md)
-- [快速部署说明](services-backend/快速部署说明.md)
-- [打包说明](services-backend/打包说明.md)
+便携版/安装包会内置 GGUF 运行库，只需要准备 `.gguf` 模型文件。
+
+网页“翻译”标签页会列出 Qwen GGUF 模型。下载 `.gguf` 文件后，放到对应目录，例如：
+
+```text
+models\translate\qwen2.5-3b-instruct-gguf
+```
+
+也可以在“翻译”标签页添加自定义翻译模型。这里和 ASR 不一样：翻译模型当前按 GGUF 方案走，所以可以选择单个 `.gguf` 文件，也可以选择包含 `.gguf` 文件的目录。校验会检查路径是否存在、后缀是否为 `.gguf`，以及目录里是否真的有模型文件。
+
+“翻译测试”会先用 ASR 转写音频，再用选中的 GGUF 模型翻译字幕。
+
+## 直播音频片段 API
+
+创建会话：
+
+```http
+POST /api/live/sessions
+Content-Type: application/json
+
+{
+  "sourceLanguage": "ja",
+  "targetLanguage": "Chinese",
+  "codec": "pcm_s16le",
+  "sampleRate": 16000,
+  "channels": 1
+}
+```
+
+上传音频片段：
+
+```http
+POST /api/live/sessions/{sessionId}/chunks
+Content-Type: multipart/form-data
+
+chunk=<audio bytes>
+sequence=1
+start_ms=0
+duration_ms=1000
+```
+
+## 前端调用建议
+
+短音频片段可以直接用同步接口：外部前端/客户端以 `multipart/form-data` 上传音频，同时带上目标语种，然后等待 JSON 返回。
+
+```http
+POST /api/audio/translate
+Content-Type: multipart/form-data
+
+file=<audio bytes>
+source_language=auto
+target_language=Chinese
+asr_model=large-v2
+translation_model=qwen2.5-1.5b-instruct-gguf
+```
+
+返回值里重点读：
+
+```json
+{
+  "sourceLanguage": "ja",
+  "targetLanguage": "Chinese",
+  "sourceText": "识别出来的原文",
+  "translatedText": "翻译后的中文",
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 2.4,
+      "text": "原文片段",
+      "translation": "中文片段"
+    }
+  ]
+}
+```
+
+长音频或可能处理很久的片段，建议继续走异步任务接口：`POST /api/jobs/translate-test` 创建任务，再轮询 `GET /api/tasks/{taskId}`，完成后读取 `result.outputs.json`。

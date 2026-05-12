@@ -20,22 +20,19 @@ venv/
 env/
 
 # Backend runtime data
-services-backend/data/
-services-backend/models/
-services-backend/*.log
-services-backend/server*.out.log
-services-backend/server*.err.log
+data/
+models/
+*.log
+server*.out.log
+server*.err.log
 
 # Backend build artifacts
-services-backend/build/
-services-backend/dist/
-services-backend/*.spec
+build/
+dist/
+*.spec
 
-# Android / Gradle
-client-android/.gradle/
-client-android/build/
-client-android/**/build/
-client-android/local.properties
+# Removed Android client workspace
+client-android/
 
 # Generated packages
 *.apk

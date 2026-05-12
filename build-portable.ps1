@@ -57,6 +57,6 @@ Copy-Item ".\怎么使用.md" ".\dist\TVCaptionerBackend\怎么使用.md" -Force
 
 Write-Host ""
 Write-Host "便携版已经生成：" -ForegroundColor Green
-Write-Host "D:\code\tv-captioner\services-backend\dist\TVCaptionerBackend\TVCaptionerBackend.exe"
+Write-Host (Join-Path $PSScriptRoot "dist\TVCaptionerBackend\TVCaptionerBackend.exe")
 Write-Host ""
 Write-Host "把 dist\TVCaptionerBackend 整个文件夹拷贝到其他 Windows 机器，双击 TVCaptionerBackend.exe 即可启动。"

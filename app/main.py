@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import array
+import math
 import shutil
 import sys
 import time
 import uuid
+import wave
 from pathlib import Path
 from typing import Annotated
 
@@ -156,6 +159,48 @@ def _text_preview(value: str, limit: int = 500) -> str:
 def _segments_preview(segments: list[dict], key: str) -> str:
     text = " ".join(str(segment.get(key) or "").strip() for segment in segments[:5]).strip()
     return _text_preview(text)
+
+
+def _audio_stats(media_path: Path) -> dict:
+    stats = {
+        "fileBytes": media_path.stat().st_size if media_path.exists() else 0,
+        "maxSample": None,
+        "rms": None,
+        "rmsDbFS": None,
+        "isSilent": None,
+    }
+    try:
+        with wave.open(str(media_path), "rb") as wav:
+            sample_width = wav.getsampwidth()
+            frames = wav.getnframes()
+            stats.update(
+                {
+                    "sampleRate": wav.getframerate(),
+                    "channels": wav.getnchannels(),
+                    "duration": frames / wav.getframerate() if wav.getframerate() else 0,
+                }
+            )
+            if sample_width != 2:
+                return stats
+            samples = array.array("h")
+            samples.frombytes(wav.readframes(frames))
+            if sys.byteorder == "big":
+                samples.byteswap()
+            if not samples:
+                return stats
+            max_sample = max(abs(sample) for sample in samples)
+            rms = math.sqrt(sum(float(sample) * float(sample) for sample in samples) / len(samples))
+            stats.update(
+                {
+                    "maxSample": max_sample,
+                    "rms": round(rms, 2),
+                    "rmsDbFS": round(20 * math.log10(rms / 32768), 1) if rms > 0 else None,
+                    "isSilent": max_sample <= 16,
+                }
+            )
+    except (EOFError, wave.Error, OSError):
+        pass
+    return stats
 
 
 if getattr(sys, "frozen", False):
@@ -357,6 +402,7 @@ def translate_audio_now(
     target_language: Annotated[str, Form()] = "Chinese",
     asr_model: Annotated[str, Form()] = "large-v2",
     translation_model: Annotated[str, Form()] = "qwen2.5-1.5b-instruct-gguf",
+    audio_source: Annotated[str, Form()] = "",
     device: Annotated[str, Form()] = "auto",
     compute_type: Annotated[str, Form()] = "auto",
     n_ctx: Annotated[int, Form()] = 4096,
@@ -366,13 +412,14 @@ def translate_audio_now(
     asr_model_path_value = _validate_asr_model(asr_model)
     translation_model_path_value = _validate_translation_model(translation_model)
     media_path, label = _store_media(request_id, file, source_path)
+    audio_stats = _audio_stats(media_path)
     requested_language = source_language.strip()
     requested_language = None if not requested_language or requested_language == "auto" else requested_language
     target = target_language.strip()
     client_ip = request.client.host if request.client else ""
 
     log_event(
-        "info",
+        "warning" if audio_stats.get("isSilent") else "info",
         "收到音频",
         category="audio",
         details={
@@ -383,6 +430,8 @@ def translate_audio_now(
             "targetLanguage": target,
             "asrModel": asr_model,
             "translationModel": translation_model,
+            "audioSource": audio_source.strip() or "unknown",
+            "audioStats": audio_stats,
             "mediaPath": str(media_path),
         },
     )

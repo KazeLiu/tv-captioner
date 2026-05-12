@@ -359,7 +359,12 @@ function renderAudioStep(item) {
     return `<div class="log-step error"><span>${escapeHtml(time)}</span><strong>处理失败：${escapeHtml(details.error || item.message || "未知错误")}</strong></div>`;
   }
   if (item.category === "audio") {
-    return `<div class="log-step"><span>${escapeHtml(time)}</span><strong>收到音频</strong></div>`;
+    const stats = details.audioStats || {};
+    const source = audioSourceLabel(details.audioSource);
+    const metrics = stats.maxSample != null
+      ? ` · 峰值 ${stats.maxSample}${stats.rmsDbFS != null ? ` · ${stats.rmsDbFS} dBFS` : ""}${stats.isSilent ? " · 静音" : ""}`
+      : "";
+    return `<div class="log-step ${stats.isSilent ? "warning" : ""}"><span>${escapeHtml(time)}</span><strong>收到音频${escapeHtml(source ? `（${source}${metrics}）` : metrics)}</strong></div>`;
   }
   if (item.category === "asr") {
     const sourceText = details.sourceText || "未识别到文本";
@@ -371,6 +376,12 @@ function renderAudioStep(item) {
     return `<div class="log-step"><span>${escapeHtml(time)}</span><strong>「${escapeHtml(sourceText)}」翻译为「${escapeHtml(translatedText)}」</strong></div>`;
   }
   return `<div class="log-step"><span>${escapeHtml(time)}</span><strong>${escapeHtml(item.message || "")}</strong></div>`;
+}
+
+function audioSourceLabel(value) {
+  if (value === "system") return "系统播放声音";
+  if (value === "microphone") return "麦克风";
+  return "";
 }
 
 function renderFlatLog(item) {
