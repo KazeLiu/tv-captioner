@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
 
 _LLAMA_CACHE: dict[tuple[str, int, int], Any] = {}
+_LLAMA_CACHE_LOCK = threading.RLock()
+_LLAMA_INFERENCE_LOCK = threading.RLock()
 
 
 class TranslationRuntimeError(RuntimeError):
@@ -25,23 +28,24 @@ def resolve_gguf_model_path(path: Path) -> Path:
 
 def _llama(model_path: Path, n_ctx: int, n_gpu_layers: int) -> Any:
     key = (str(model_path), n_ctx, n_gpu_layers)
-    if key in _LLAMA_CACHE:
+    with _LLAMA_CACHE_LOCK:
+        if key in _LLAMA_CACHE:
+            return _LLAMA_CACHE[key]
+
+        try:
+            from llama_cpp import Llama
+        except ImportError as exc:
+            raise TranslationRuntimeError(
+                "缺少 llama-cpp-python，无法加载 GGUF 翻译模型。请先安装后再运行翻译测试。"
+            ) from exc
+
+        _LLAMA_CACHE[key] = Llama(
+            model_path=str(model_path),
+            n_ctx=n_ctx,
+            n_gpu_layers=n_gpu_layers,
+            verbose=False,
+        )
         return _LLAMA_CACHE[key]
-
-    try:
-        from llama_cpp import Llama
-    except ImportError as exc:
-        raise TranslationRuntimeError(
-            "缺少 llama-cpp-python，无法加载 GGUF 翻译模型。请先安装后再运行翻译测试。"
-        ) from exc
-
-    _LLAMA_CACHE[key] = Llama(
-        model_path=str(model_path),
-        n_ctx=n_ctx,
-        n_gpu_layers=n_gpu_layers,
-        verbose=False,
-    )
-    return _LLAMA_CACHE[key]
 
 
 def _language_label(language: str | None) -> str:
@@ -66,6 +70,18 @@ def _completion_text(result: dict[str, Any]) -> str:
     return str(message.get("content") or choice.get("text") or "").strip()
 
 
+def _trim_context(context: str, limit: int) -> str:
+    text = " ".join(context.split())
+    if len(text) <= limit:
+        return text
+    return text[-limit:]
+
+
+def _append_context(context: str, source_text: str, translated_text: str, limit: int) -> str:
+    item = f"Source: {source_text}\nTranslation: {translated_text}".strip()
+    return _trim_context(f"{context}\n{item}".strip(), limit)
+
+
 def translate_segments(
     segments: list[dict[str, Any]],
     model_path: Path,
@@ -74,6 +90,8 @@ def translate_segments(
     update: Callable[..., None],
     n_ctx: int = 4096,
     n_gpu_layers: int = 0,
+    previous_context: str = "",
+    context_window_chars: int = 800,
 ) -> list[dict[str, Any]]:
     if not target_language.strip():
         raise TranslationRuntimeError("请填写目标语言。")
@@ -83,33 +101,47 @@ def translate_segments(
     llm = _llama(gguf_path, n_ctx=n_ctx, n_gpu_layers=n_gpu_layers)
 
     source = _language_label(source_language)
+    rolling_context = _trim_context(previous_context, context_window_chars)
     translated_segments: list[dict[str, Any]] = []
     total = max(len(segments), 1)
     for index, segment in enumerate(segments, start=1):
         text = str(segment.get("text") or "").strip()
         translated_text = ""
         if text:
-            result = llm.create_chat_completion(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a subtitle translator. Translate faithfully and naturally. "
-                            "Keep names, numbers, and punctuation sensible. Return only the translation."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Translate this subtitle from {source} to {target_language}:\n"
-                            f"{text}"
-                        ),
-                    },
-                ],
-                temperature=0.1,
-                max_tokens=256,
+            context_block = (
+                f"Previous subtitle context for continuity:\n{rolling_context}\n\n"
+                if rolling_context
+                else ""
             )
+            with _LLAMA_INFERENCE_LOCK:
+                result = llm.create_chat_completion(
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a subtitle translator. Translate faithfully and naturally. "
+                                "Keep names, numbers, and punctuation sensible. Return only the translation."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": (
+                                f"{context_block}"
+                                f"Translate this subtitle from {source} to {target_language}:\n"
+                                f"{text}"
+                            ),
+                        },
+                    ],
+                    temperature=0.1,
+                    max_tokens=256,
+                )
             translated_text = _completion_text(result)
+            rolling_context = _append_context(
+                rolling_context,
+                source_text=text,
+                translated_text=translated_text,
+                limit=context_window_chars,
+            )
 
         translated_segments.append({**segment, "translation": translated_text})
         update(

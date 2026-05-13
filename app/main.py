@@ -11,7 +11,7 @@ import wave
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -23,8 +23,10 @@ from .catalog import (
     TRANSLATION_MODELS,
     UPLOAD_DIR,
     asr_model_path,
+    builtin_asr_model_entry,
     ensure_dirs,
     is_asr_model_ready,
+    translation_model_entry,
     translation_model_path,
 )
 from .custom_models import (
@@ -39,8 +41,10 @@ from .custom_models import (
     validate_custom_model_path,
     validate_translation_model_path,
 )
+from .chinese import convert_segment_texts, normalize_chinese_script
 from .environment import environment_status
 from .live_audio import create_live_session, get_live_session, list_live_sessions, save_live_chunk
+from .live_stream import LiveAudioProcessor, LiveStreamConfig
 from .logs import list_events, log_event
 from .tasks import TaskStore
 from .translate import translate_segments
@@ -161,6 +165,67 @@ def _segments_preview(segments: list[dict], key: str) -> str:
     return _text_preview(text)
 
 
+def _normalize_source_language(language: str | None) -> str | None:
+    value = (language or "").strip()
+    if not value or value.lower() == "auto":
+        return None
+    labels = {
+        "chinese": "zh",
+        "中文": "zh",
+        "zh-cn": "zh",
+        "japanese": "ja",
+        "日本語": "ja",
+        "日语": "ja",
+        "korean": "ko",
+        "韩语": "ko",
+        "english": "en",
+        "英语": "en",
+        "arabic": "ar",
+        "阿拉伯语": "ar",
+    }
+    return labels.get(value.lower(), value)
+
+
+def _normalize_chinese_script_or_400(script: str | None) -> str:
+    try:
+        return normalize_chinese_script(script)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _asr_model_entries() -> list[dict]:
+    return [
+        *[builtin_asr_model_entry(key) for key in ASR_MODELS],
+        *[
+            {
+                **model,
+                "custom": True,
+                "ready": (validation := validate_custom_model_path(str(model.get("path", ""))))["ok"],
+                "sizeBytes": validation["sizeBytes"],
+                "validation": validation,
+            }
+            for model in load_custom_models()
+        ],
+    ]
+
+
+def _translation_model_entries() -> list[dict]:
+    return [
+        *[translation_model_entry(key) for key in TRANSLATION_MODELS],
+        *[
+            {
+                **model,
+                "custom": True,
+                "ready": (validation := validate_translation_model_path(str(model.get("path", ""))))["ok"],
+                "sizeBytes": validation["sizeBytes"],
+                "files": validation["files"],
+                "validation": validation,
+            }
+            for model in load_custom_translation_models()
+        ],
+    ]
+
+
 def _audio_stats(media_path: Path) -> dict:
     stats = {
         "fileBytes": media_path.stat().st_size if media_path.exists() else 0,
@@ -270,6 +335,28 @@ def get_task(task_id: str) -> dict:
 @app.get("/api/logs")
 def get_logs(level: str | None = None, limit: int = 200) -> list[dict]:
     return list_events(level=level, limit=limit)
+
+
+@app.get("/api/models")
+def list_models() -> dict:
+    asr_models = _asr_model_entries()
+    translation_models = _translation_model_entries()
+    return {
+        "asrModels": asr_models,
+        "translationModels": translation_models,
+        "readyAsrModels": [model for model in asr_models if model.get("ready")],
+        "readyTranslationModels": [model for model in translation_models if model.get("ready")],
+    }
+
+
+@app.get("/api/models/asr")
+def list_asr_models() -> list[dict]:
+    return _asr_model_entries()
+
+
+@app.get("/api/models/translate")
+def list_translation_models() -> list[dict]:
+    return _translation_model_entries()
 
 
 @app.get("/api/models/asr/custom")
@@ -393,6 +480,127 @@ async def receive_live_chunk(
     return {"accepted": True, "chunk": record}
 
 
+@app.websocket("/api/live/ws")
+async def live_websocket(
+    websocket: WebSocket,
+    source_language: Annotated[str, Query(alias="sourceLanguage")] = "",
+    target_language: Annotated[str, Query(alias="targetLanguage")] = "Chinese",
+    asr_model: Annotated[str, Query(alias="asrModel")] = "large-v2",
+    translation_model: Annotated[str, Query(alias="translationModel")] = "qwen2.5-1.5b-instruct-gguf",
+    device: str = "auto",
+    compute_type: Annotated[str, Query(alias="computeType")] = "auto",
+    n_ctx: Annotated[int, Query(alias="nCtx")] = 4096,
+    n_gpu_layers: Annotated[int, Query(alias="nGpuLayers")] = 0,
+    codec: str = "pcm_s16le",
+    sample_rate: Annotated[int, Query(alias="sampleRate")] = 16000,
+    channels: int = 1,
+    silence_ms: Annotated[int, Query(alias="silenceMs")] = 300,
+    max_segment_ms: Annotated[int, Query(alias="maxSegmentMs")] = 5000,
+    min_segment_ms: Annotated[int, Query(alias="minSegmentMs")] = 300,
+    vad_threshold: Annotated[float, Query(alias="vadThreshold")] = 0.5,
+    chinese_script: Annotated[str, Query(alias="chineseScript")] = "simplified",
+) -> None:
+    try:
+        if codec != "pcm_s16le":
+            raise HTTPException(status_code=400, detail="WebSocket live mode currently expects codec=pcm_s16le")
+        if sample_rate <= 0:
+            raise HTTPException(status_code=400, detail="sampleRate must be greater than 0")
+        if channels < 1 or channels > 2:
+            raise HTTPException(status_code=400, detail="channels must be 1 or 2")
+        if silence_ms < 200:
+            raise HTTPException(status_code=400, detail="silenceMs must be at least 200")
+        if not target_language.strip():
+            raise HTTPException(status_code=400, detail="targetLanguage is required")
+
+        asr_model_path_value = _validate_asr_model(asr_model)
+        translation_model_path_value = _validate_translation_model(translation_model)
+    except HTTPException as exc:
+        await websocket.accept()
+        await websocket.send_json({"type": "error", "message": exc.detail})
+        await websocket.close(code=1008)
+        return
+
+    requested_language = _normalize_source_language(source_language)
+    processor = LiveAudioProcessor(
+        websocket=websocket,
+        config=LiveStreamConfig(
+            source_language=requested_language,
+            target_language=target_language.strip(),
+            asr_model_path=asr_model_path_value,
+            translation_model_path=translation_model_path_value,
+            chinese_script=_normalize_chinese_script_or_400(chinese_script),
+            device=device,
+            compute_type=compute_type,
+            n_ctx=n_ctx,
+            n_gpu_layers=n_gpu_layers,
+            codec=codec,
+            sample_rate=sample_rate,
+            channels=channels,
+            silence_ms=silence_ms,
+            max_segment_ms=max_segment_ms,
+            min_segment_ms=min_segment_ms,
+            vad_threshold=vad_threshold,
+        ),
+    )
+    await processor.run()
+
+
+@app.websocket("/api/live/asr-ws")
+async def live_asr_websocket(
+    websocket: WebSocket,
+    source_language: Annotated[str, Query(alias="sourceLanguage")] = "",
+    asr_model: Annotated[str, Query(alias="asrModel")] = "large-v2",
+    device: str = "auto",
+    compute_type: Annotated[str, Query(alias="computeType")] = "auto",
+    codec: str = "pcm_s16le",
+    sample_rate: Annotated[int, Query(alias="sampleRate")] = 16000,
+    channels: int = 1,
+    silence_ms: Annotated[int, Query(alias="silenceMs")] = 300,
+    max_segment_ms: Annotated[int, Query(alias="maxSegmentMs")] = 5000,
+    min_segment_ms: Annotated[int, Query(alias="minSegmentMs")] = 300,
+    vad_threshold: Annotated[float, Query(alias="vadThreshold")] = 0.5,
+    chinese_script: Annotated[str, Query(alias="chineseScript")] = "simplified",
+) -> None:
+    try:
+        if codec != "pcm_s16le":
+            raise HTTPException(status_code=400, detail="WebSocket ASR mode currently expects codec=pcm_s16le")
+        if sample_rate <= 0:
+            raise HTTPException(status_code=400, detail="sampleRate must be greater than 0")
+        if channels < 1 or channels > 2:
+            raise HTTPException(status_code=400, detail="channels must be 1 or 2")
+        if silence_ms < 200:
+            raise HTTPException(status_code=400, detail="silenceMs must be at least 200")
+
+        asr_model_path_value = _validate_asr_model(asr_model)
+    except HTTPException as exc:
+        await websocket.accept()
+        await websocket.send_json({"type": "error", "message": exc.detail})
+        await websocket.close(code=1008)
+        return
+
+    processor = LiveAudioProcessor(
+        websocket=websocket,
+        config=LiveStreamConfig(
+            source_language=_normalize_source_language(source_language),
+            target_language="",
+            asr_model_path=asr_model_path_value,
+            translation_model_path=None,
+            translate_enabled=False,
+            chinese_script=_normalize_chinese_script_or_400(chinese_script),
+            device=device,
+            compute_type=compute_type,
+            codec=codec,
+            sample_rate=sample_rate,
+            channels=channels,
+            silence_ms=silence_ms,
+            max_segment_ms=max_segment_ms,
+            min_segment_ms=min_segment_ms,
+            vad_threshold=vad_threshold,
+        ),
+    )
+    await processor.run()
+
+
 @app.post("/api/audio/translate")
 def translate_audio_now(
     request: Request,
@@ -407,14 +615,15 @@ def translate_audio_now(
     compute_type: Annotated[str, Form()] = "auto",
     n_ctx: Annotated[int, Form()] = 4096,
     n_gpu_layers: Annotated[int, Form()] = 0,
+    chinese_script: Annotated[str, Form()] = "simplified",
 ) -> dict:
     request_id = uuid.uuid4().hex
     asr_model_path_value = _validate_asr_model(asr_model)
     translation_model_path_value = _validate_translation_model(translation_model)
     media_path, label = _store_media(request_id, file, source_path)
     audio_stats = _audio_stats(media_path)
-    requested_language = source_language.strip()
-    requested_language = None if not requested_language or requested_language == "auto" else requested_language
+    requested_language = _normalize_source_language(source_language)
+    output_chinese_script = _normalize_chinese_script_or_400(chinese_script)
     target = target_language.strip()
     client_ip = request.client.host if request.client else ""
 
@@ -430,6 +639,7 @@ def translate_audio_now(
             "targetLanguage": target,
             "asrModel": asr_model,
             "translationModel": translation_model,
+            "chineseScript": output_chinese_script,
             "audioSource": audio_source.strip() or "unknown",
             "audioStats": audio_stats,
             "mediaPath": str(media_path),
@@ -448,9 +658,10 @@ def translate_audio_now(
             compute_type=compute_type,
             update=_scaled_update(update, 0.0, 0.55),
         )
+        asr_result["segments"] = convert_segment_texts(asr_result["segments"], output_chinese_script)
         detected_language = asr_result["language"]
         log_event(
-            "info" if asr_result["segments"] else "warning",
+            "info",
             "同步音频转写完成" if asr_result["segments"] else "同步音频转写完成但未识别到文本",
             category="asr",
             details={
@@ -473,6 +684,7 @@ def translate_audio_now(
             n_ctx=n_ctx,
             n_gpu_layers=n_gpu_layers,
         )
+        segments = convert_segment_texts(segments, output_chinese_script)
     except Exception as exc:
         log_event(
             "error",
@@ -504,6 +716,7 @@ def translate_audio_now(
         "requestedSourceLanguage": requested_language or "auto",
         "languageProbability": asr_result["languageProbability"],
         "targetLanguage": target,
+        "chineseScript": output_chinese_script,
         "duration": asr_result["duration"],
         "segmentCount": len(segments),
         "sourceText": source_text,
@@ -520,9 +733,11 @@ def create_transcription_job(
     asr_model: Annotated[str, Form()] = "large-v2",
     device: Annotated[str, Form()] = "auto",
     compute_type: Annotated[str, Form()] = "auto",
+    chinese_script: Annotated[str, Form()] = "simplified",
 ) -> dict:
     job_id = uuid.uuid4().hex
     model_path = _validate_asr_model(asr_model)
+    output_chinese_script = _normalize_chinese_script_or_400(chinese_script)
     media_path, label = _store_media(job_id, file, source_path)
     log_event(
         "info",
@@ -533,6 +748,7 @@ def create_transcription_job(
             "label": label,
             "sourceLanguage": source_language or "auto",
             "asrModel": asr_model,
+            "chineseScript": output_chinese_script,
             "mediaPath": str(media_path),
         },
     )
@@ -550,9 +766,9 @@ def create_transcription_job(
                 compute_type=compute_type,
                 update=update,
             )
-            segments = asr_result["segments"]
+            segments = convert_segment_texts(asr_result["segments"], output_chinese_script)
             log_event(
-                "info" if segments else "warning",
+                "info",
                 "音频转写完成" if segments else "音频转写完成但未识别到文本",
                 category="asr",
                 details={
@@ -573,6 +789,7 @@ def create_transcription_job(
                 "duration": asr_result["duration"],
                 "translationEngine": None,
                 "targetLanguage": None,
+                "chineseScript": output_chinese_script,
                 "segments": segments,
             }
             json_path = output_prefix.with_suffix(".json")
@@ -611,10 +828,12 @@ def create_translation_test_job(
     compute_type: Annotated[str, Form()] = "auto",
     n_ctx: Annotated[int, Form()] = 4096,
     n_gpu_layers: Annotated[int, Form()] = 0,
+    chinese_script: Annotated[str, Form()] = "simplified",
 ) -> dict:
     job_id = uuid.uuid4().hex
     asr_model_path_value = _validate_asr_model(asr_model)
     translation_model_path_value = _validate_translation_model(translation_model)
+    output_chinese_script = _normalize_chinese_script_or_400(chinese_script)
     media_path, label = _store_media(job_id, file, source_path)
     log_event(
         "info",
@@ -627,6 +846,7 @@ def create_translation_test_job(
             "targetLanguage": target_language,
             "asrModel": asr_model,
             "translationModel": translation_model,
+            "chineseScript": output_chinese_script,
             "mediaPath": str(media_path),
         },
     )
@@ -644,9 +864,10 @@ def create_translation_test_job(
                 compute_type=compute_type,
                 update=_scaled_update(update, 0.0, 0.55),
             )
+            asr_result["segments"] = convert_segment_texts(asr_result["segments"], output_chinese_script)
             detected_language = asr_result["language"]
             log_event(
-                "info" if asr_result["segments"] else "warning",
+                "info",
                 "音频转写完成" if asr_result["segments"] else "音频转写完成但未识别到文本",
                 category="asr",
                 details={
@@ -669,6 +890,7 @@ def create_translation_test_job(
                 n_ctx=n_ctx,
                 n_gpu_layers=n_gpu_layers,
             )
+            segments = convert_segment_texts(segments, output_chinese_script)
             log_event(
                 "info",
                 "字幕翻译完成",
@@ -693,6 +915,7 @@ def create_translation_test_job(
                 "duration": asr_result["duration"],
                 "translationEngine": "llama-cpp-python",
                 "targetLanguage": target_language.strip(),
+                "chineseScript": output_chinese_script,
                 "segments": segments,
             }
             json_path = output_prefix.with_suffix(".json")

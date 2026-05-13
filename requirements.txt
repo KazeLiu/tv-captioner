@@ -5,3 +5,4 @@ numpy==1.26.4
 faster-whisper==1.1.1
 huggingface-hub==0.27.1
 llama-cpp-python==0.3.7
+opencc-python-reimplemented==0.1.7

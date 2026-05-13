@@ -33,6 +33,7 @@ tv-captioner/
 - 本地文件 ASR 测试
 - 本地文件转写 + 翻译测试，输出原文 SRT、翻译 SRT、双语 SRT 和 JSON
 - 接收外部前端/客户端上传的直播音频片段
+- WebSocket 实时接收 PCM 音频流，使用 faster-whisper 内置 Silero VAD 断句后转写和翻译
 - 日志页面：记录接口调用、音频接收、转写原文、翻译结果、warning 和 error；日志自动保留最近 10 天
 
 ## 启动
@@ -120,6 +121,62 @@ chunk=<audio bytes>
 sequence=1
 start_ms=0
 duration_ms=1000
+```
+
+## 实时 WebSocket 字幕 API
+
+实时模式用于新前端直接把二进制音频流推给后端。当前约定前端发送原始 PCM：
+
+```text
+codec=pcm_s16le
+sampleRate=16000
+channels=1
+```
+
+连接地址示例：
+
+```text
+ws://127.0.0.1:8765/api/live/ws?sourceLanguage=auto&targetLanguage=Chinese&asrModel=<ready-asr-model-key>&translationModel=<ready-translation-model-key>&sampleRate=16000&channels=1&silenceMs=300&maxSegmentMs=5000&chineseScript=simplified
+```
+
+连接建立后，前端持续发送二进制 PCM 块即可。建议每块 20-100ms，后端会为每个 WebSocket 连接维护独立缓冲区、VAD 状态和处理队列。Silero VAD 检测到人声结束后，若静音持续达到 `silenceMs`，后端会把当前句子送入 ASR；如果新闻主播连续说话没有明显停顿，后端也会在 `maxSegmentMs` 达到后强制切出一段，再带上上一段字幕上下文进行翻译。
+
+中文输出默认转成简体中文。可用 `chineseScript=simplified`、`chineseScript=traditional` 或 `chineseScript=original` 切换；`sourceLanguage=zh` 只表示中文语音，不负责区分简体/繁体。
+
+如果只需要实时语音转文字，不需要翻译模型，使用：
+
+```text
+ws://127.0.0.1:8765/api/live/asr-ws?sourceLanguage=auto&asrModel=<ready-asr-model-key>&sampleRate=16000&channels=1&silenceMs=300&maxSegmentMs=5000&chineseScript=simplified
+```
+
+这个接口返回 `translationEnabled=false`，前端直接显示 `segments[].text`。
+
+前端可发送 JSON 文本控制消息：
+
+```json
+{"type": "flush"}
+```
+
+返回消息里最重要的是 `segment`：
+
+```json
+{
+  "type": "segment",
+  "id": "session-0",
+  "sourceLanguage": "ja",
+  "targetLanguage": "Chinese",
+  "start": 1.25,
+  "end": 4.8,
+  "forced": false,
+  "segments": [
+    {
+      "start": 1.32,
+      "end": 4.2,
+      "text": "原文片段",
+      "translation": "中文片段"
+    }
+  ]
+}
 ```
 
 ## 前端调用建议

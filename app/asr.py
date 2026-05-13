@@ -2,20 +2,24 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
+import numpy as np
 from faster_whisper import WhisperModel
 
 
 _MODEL_CACHE: dict[tuple[str, str, str], WhisperModel] = {}
+_MODEL_CACHE_LOCK = threading.RLock()
 
 
 def _model(model_path: Path, device: str, compute_type: str) -> WhisperModel:
     key = (str(model_path), device, compute_type)
-    if key not in _MODEL_CACHE:
-        _MODEL_CACHE[key] = WhisperModel(str(model_path), device=device, compute_type=compute_type)
-    return _MODEL_CACHE[key]
+    with _MODEL_CACHE_LOCK:
+        if key not in _MODEL_CACHE:
+            _MODEL_CACHE[key] = WhisperModel(str(model_path), device=device, compute_type=compute_type)
+        return _MODEL_CACHE[key]
 
 
 def format_timestamp(seconds: float) -> str:
@@ -63,27 +67,34 @@ def write_json(payload: dict[str, Any], output_path: Path) -> None:
     output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def transcribe_media(
-    media_path: Path,
+def _transcribe(
+    audio: str | Path | np.ndarray,
     model_path: Path,
     language: str | None,
     device: str,
     compute_type: str,
     update: Callable[..., None],
+    initial_prompt: str | None = None,
+    beam_size: int = 5,
+    vad_filter: bool = True,
+    condition_on_previous_text: bool = True,
 ) -> dict[str, Any]:
     update(message="Loading ASR model", progress=None)
     whisper = _model(model_path, device=device, compute_type=compute_type)
 
     kwargs: dict[str, Any] = {
-        "beam_size": 5,
-        "vad_filter": True,
+        "beam_size": beam_size,
+        "vad_filter": vad_filter,
         "word_timestamps": False,
+        "condition_on_previous_text": condition_on_previous_text,
     }
     if language:
         kwargs["language"] = language
+    if initial_prompt:
+        kwargs["initial_prompt"] = initial_prompt
 
     update(message="Transcribing media", progress=0.05)
-    segments_iter, info = whisper.transcribe(str(media_path), **kwargs)
+    segments_iter, info = whisper.transcribe(str(audio) if isinstance(audio, Path) else audio, **kwargs)
 
     duration = info.duration or 0
     segments: list[dict[str, Any]] = []
@@ -105,3 +116,47 @@ def transcribe_media(
         "duration": duration,
         "segments": segments,
     }
+
+
+def transcribe_media(
+    media_path: Path,
+    model_path: Path,
+    language: str | None,
+    device: str,
+    compute_type: str,
+    update: Callable[..., None],
+) -> dict[str, Any]:
+    return _transcribe(
+        audio=media_path,
+        model_path=model_path,
+        language=language,
+        device=device,
+        compute_type=compute_type,
+        update=update,
+    )
+
+
+def transcribe_audio_array(
+    audio: np.ndarray,
+    model_path: Path,
+    language: str | None,
+    device: str,
+    compute_type: str,
+    update: Callable[..., None],
+    initial_prompt: str | None = None,
+    beam_size: int = 5,
+    vad_filter: bool = True,
+    condition_on_previous_text: bool = True,
+) -> dict[str, Any]:
+    return _transcribe(
+        audio=audio,
+        model_path=model_path,
+        language=language,
+        device=device,
+        compute_type=compute_type,
+        update=update,
+        initial_prompt=initial_prompt,
+        beam_size=beam_size,
+        vad_filter=vad_filter,
+        condition_on_previous_text=condition_on_previous_text,
+    )

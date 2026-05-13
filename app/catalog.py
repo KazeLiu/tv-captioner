@@ -94,7 +94,7 @@ ASR_MODELS = {
         "name_cn": "large-v2（推荐基线）",
         "repo_id": "Systran/faster-whisper-large-v2",
         "url": "https://huggingface.co/Systran/faster-whisper-large-v2",
-        "description": "推荐优先测试。和你 PotPlayer 里 large-v2 的思路接近，适合作为日语、韩语、阿语、英语电视台的质量基线。",
+        "description": "推荐优先测试，适合作为日语、韩语、阿语、英语电视台的质量基线。",
     },
     "large-v3": {
         "label": "Whisper large-v3",
