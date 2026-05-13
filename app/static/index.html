@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>TV Captioner Backend</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260513-log-filters-2" />
   </head>
   <body>
     <main class="shell">
@@ -272,9 +272,15 @@
 
       <section id="tab-logs" class="tab-panel">
         <section class="band">
-          <div class="section-title">
+          <div class="section-title log-title">
             <h2>运行日志</h2>
-            <label class="compact-control">
+            <label class="check inline-check">
+              <input id="autoRefreshToggle" type="checkbox" />
+              自动刷新
+            </label>
+          </div>
+          <div class="log-filters">
+            <label>
               等级
               <select id="logLevelFilter">
                 <option value="">全部</option>
@@ -283,12 +289,33 @@
                 <option value="error">error</option>
               </select>
             </label>
+            <label>
+              类别
+              <select id="logTypeFilter">
+                <option value="">全部</option>
+                <option value="transcribed">只转写</option>
+                <option value="translated">有翻译</option>
+                <option value="unrecognized">未识别</option>
+              </select>
+            </label>
+            <label>
+              开始时间
+              <input id="logFromFilter" type="datetime-local" />
+            </label>
+            <label>
+              结束时间
+              <input id="logToFilter" type="datetime-local" />
+            </label>
+            <label>
+              IP
+              <input id="logIpFilter" type="search" placeholder="192.168.1.79" />
+            </label>
           </div>
           <div id="logList" class="log-list"></div>
         </section>
       </section>
     </main>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20260513-log-filters-2"></script>
   </body>
 </html>

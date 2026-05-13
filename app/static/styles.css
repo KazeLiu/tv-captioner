@@ -327,6 +327,30 @@ select {
   width: min(180px, 100%);
 }
 
+.log-title {
+  align-items: end;
+}
+
+.inline-check {
+  display: inline-grid;
+  grid-template-columns: auto auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+}
+
+.inline-check input {
+  width: 18px;
+  min-height: 18px;
+}
+
+.log-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
 .log-row {
   display: grid;
   gap: 8px;
@@ -402,6 +426,15 @@ select {
   gap: 8px;
 }
 
+.log-group-title {
+  font-size: 15px;
+}
+
+.log-message {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
 .log-step {
   display: grid;
   grid-template-columns: minmax(130px, auto) minmax(0, 1fr);
@@ -416,17 +449,17 @@ select {
   font-size: 12px;
 }
 
-.log-step strong {
+.log-step span:last-child {
   font-size: 13px;
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
 
-.log-step.warning strong {
+.log-step.warning span:last-child {
   color: #8f5107;
 }
 
-.log-step.error strong {
+.log-step.error span:last-child {
   color: #9b2f25;
 }
 

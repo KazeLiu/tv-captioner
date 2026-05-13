@@ -8,6 +8,11 @@ const taskList = document.querySelector("#taskList");
 const translationTaskList = document.querySelector("#translationTaskList");
 const logList = document.querySelector("#logList");
 const logLevelFilter = document.querySelector("#logLevelFilter");
+const logTypeFilter = document.querySelector("#logTypeFilter");
+const logFromFilter = document.querySelector("#logFromFilter");
+const logToFilter = document.querySelector("#logToFilter");
+const logIpFilter = document.querySelector("#logIpFilter");
+const autoRefreshToggle = document.querySelector("#autoRefreshToggle");
 const refreshBtn = document.querySelector("#refreshBtn");
 const jobForm = document.querySelector("#jobForm");
 const customModelForm = document.querySelector("#customModelForm");
@@ -19,6 +24,8 @@ const validateTranslationModelBtn = document.querySelector("#validateTranslation
 const translationTestForm = document.querySelector("#translationTestForm");
 let autoSelectedModel = false;
 let autoSelectedTranslationModel = false;
+let latestLogs = [];
+let refreshTimer = null;
 
 const fmtBytes = (bytes) => {
   if (!bytes) return "0 B";
@@ -276,12 +283,10 @@ async function refreshTasks() {
 
 async function refreshLogs() {
   if (!logList) return;
-  const level = logLevelFilter.value;
-  const params = new URLSearchParams({ limit: "200" });
-  if (level) params.set("level", level);
+  const params = new URLSearchParams({ limit: "1000" });
   const response = await fetch(`/api/logs?${params}`);
-  const logs = await response.json();
-  renderLogs(logs);
+  latestLogs = await response.json();
+  renderLogs(latestLogs);
 }
 
 function renderLogs(logs) {
@@ -295,24 +300,32 @@ function renderLogs(logs) {
   const otherLogs = [];
   for (const item of logs) {
     const requestId = item.details?.requestId;
-    const isAudioFlow = requestId && ["audio", "asr", "translation"].includes(item.category);
+    const utteranceId = item.details?.utteranceId;
+    const groupId = requestId || utteranceId;
+    const isAudioFlow =
+      groupId &&
+      (["audio", "asr", "translation"].includes(item.category) ||
+        (item.category === "live" && utteranceId));
     if (!isAudioFlow) {
       otherLogs.push(item);
       continue;
     }
-    if (!audioGroups.has(requestId)) {
-      audioGroups.set(requestId, []);
+    if (!audioGroups.has(groupId)) {
+      audioGroups.set(groupId, []);
     }
-    audioGroups.get(requestId).push(item);
+    audioGroups.get(groupId).push(item);
   }
 
+  const filters = currentLogFilters();
   const groupedLogs = [...audioGroups.entries()]
     .map(([requestId, items]) => ({
       requestId,
       items: items.sort((a, b) => Date.parse(a.timestamp || 0) - Date.parse(b.timestamp || 0)),
       latestAt: Math.max(...items.map((item) => Date.parse(item.timestamp || 0) || 0)),
     }))
+    .filter((group) => matchesAudioGroupFilters(group, filters))
     .sort((a, b) => b.latestAt - a.latestAt);
+  const filteredOtherLogs = otherLogs.filter((item) => matchesFlatLogFilters(item, filters));
 
   if (groupedLogs.length) {
     logList.insertAdjacentHTML("beforeend", `<div class="log-section-title">音频处理日志</div>`);
@@ -321,18 +334,22 @@ function renderLogs(logs) {
     }
   }
 
-  if (otherLogs.length) {
+  if (filteredOtherLogs.length) {
     logList.insertAdjacentHTML("beforeend", `<div class="log-section-title">接口和系统日志</div>`);
-    for (const item of otherLogs) {
+    for (const item of filteredOtherLogs) {
       renderFlatLog(item);
     }
+  }
+
+  if (!groupedLogs.length && !filteredOtherLogs.length) {
+    logList.innerHTML = `<div class="tile"><span>没有符合条件的日志</span><div class="meta">可以放宽时间、IP 或类别条件。</div></div>`;
   }
 }
 
 function renderAudioLogGroup(group) {
-  const level = group.items.some((item) => item.level === "error")
+  const level = group.items.some((item) => normalizedLogLevel(item) === "error")
     ? "error"
-    : group.items.some((item) => item.level === "warning")
+    : group.items.some((item) => normalizedLogLevel(item) === "warning")
       ? "warning"
       : "info";
   const received = group.items.find((item) => item.category === "audio") || group.items[0];
@@ -346,7 +363,7 @@ function renderAudioLogGroup(group) {
         <span class="log-level">${escapeHtml(logLevelLabels[level] || level)}</span>
         <span class="meta">${escapeHtml(time)} · IP ${escapeHtml(ip)}</span>
       </div>
-      <strong>音频处理 ${escapeHtml(group.requestId.slice(0, 8))}</strong>
+      <div class="log-group-title">音频处理 ${escapeHtml(group.requestId.slice(0, 8))}</div>
       <div class="log-steps">${steps}</div>
     </article>`,
   );
@@ -356,7 +373,7 @@ function renderAudioStep(item) {
   const details = item.details || {};
   const time = formatLogTime(item.timestamp);
   if (item.level === "error") {
-    return `<div class="log-step error"><span>${escapeHtml(time)}</span><strong>处理失败：${escapeHtml(details.error || item.message || "未知错误")}</strong></div>`;
+    return `<div class="log-step error"><span>${escapeHtml(time)}</span><span>处理失败：${escapeHtml(details.error || item.message || "未知错误")}</span></div>`;
   }
   if (item.category === "audio") {
     const stats = details.audioStats || {};
@@ -364,18 +381,26 @@ function renderAudioStep(item) {
     const metrics = stats.maxSample != null
       ? ` · 峰值 ${stats.maxSample}${stats.rmsDbFS != null ? ` · ${stats.rmsDbFS} dBFS` : ""}${stats.isSilent ? " · 静音" : ""}`
       : "";
-    return `<div class="log-step ${stats.isSilent ? "warning" : ""}"><span>${escapeHtml(time)}</span><strong>收到音频${escapeHtml(source ? `（${source}${metrics}）` : metrics)}</strong></div>`;
+    return `<div class="log-step ${stats.isSilent ? "warning" : ""}"><span>${escapeHtml(time)}</span><span>收到音频${escapeHtml(source ? `（${source}${metrics}）` : metrics)}</span></div>`;
+  }
+  if (item.category === "live" && item.message === "收到音频") {
+    const seconds = details.duration != null ? ` · ${Number(details.duration).toFixed(2)}s` : "";
+    const bytes = details.sizeBytes != null ? ` · ${fmtBytes(details.sizeBytes)}` : "";
+    return `<div class="log-step"><span>${escapeHtml(time)}</span><span>收到音频${escapeHtml(seconds + bytes)}</span></div>`;
   }
   if (item.category === "asr") {
     const sourceText = details.sourceText || "未识别到文本";
-    return `<div class="log-step ${item.level === "warning" ? "warning" : ""}"><span>${escapeHtml(time)}</span><strong>音频转写为「${escapeHtml(sourceText)}」</strong></div>`;
+    return `<div class="log-step"><span>${escapeHtml(time)}</span><span>音频转写为「${escapeHtml(sourceText)}」</span></div>`;
   }
-  if (item.category === "translation" && details.translatedText != null) {
-    const sourceText = details.sourceText || "";
+  if ((item.category === "asr" || item.category === "live") && details.sourceText != null && details.translatedText == null) {
+    const sourceText = details.sourceText || "未识别到文本";
+    return `<div class="log-step"><span>${escapeHtml(time)}</span><span>音频转写为「${escapeHtml(sourceText)}」</span></div>`;
+  }
+  if ((item.category === "translation" || item.category === "live") && details.translatedText != null) {
     const translatedText = details.translatedText || "";
-    return `<div class="log-step"><span>${escapeHtml(time)}</span><strong>「${escapeHtml(sourceText)}」翻译为「${escapeHtml(translatedText)}」</strong></div>`;
+    return `<div class="log-step"><span>${escapeHtml(time)}</span><span>翻译为「${escapeHtml(translatedText)}」</span></div>`;
   }
-  return `<div class="log-step"><span>${escapeHtml(time)}</span><strong>${escapeHtml(item.message || "")}</strong></div>`;
+  return `<div class="log-step"><span>${escapeHtml(time)}</span><span>${escapeHtml(item.message || "")}</span></div>`;
 }
 
 function audioSourceLabel(value) {
@@ -397,7 +422,7 @@ function renderFlatLog(item) {
         <span class="log-level">${escapeHtml(logLevelLabels[level] || level)}</span>
         <span class="meta">${escapeHtml(time)} · ${escapeHtml(item.category || "system")}</span>
       </div>
-      <strong>${escapeHtml(item.message || "")}</strong>
+      <div class="log-message">${escapeHtml(item.message || "")}</div>
       ${details}
     </article>`,
   );
@@ -405,6 +430,82 @@ function renderFlatLog(item) {
 
 function formatLogTime(timestamp) {
   return timestamp ? new Date(timestamp).toLocaleString() : "";
+}
+
+function currentLogFilters() {
+  return {
+    level: logLevelFilter.value,
+    type: logTypeFilter.value,
+    from: parseLocalDateTime(logFromFilter.value),
+    to: parseLocalDateTime(logToFilter.value),
+    ip: logIpFilter.value.trim(),
+  };
+}
+
+function parseLocalDateTime(value) {
+  if (!value) return null;
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) ? time : null;
+}
+
+function normalizedLogLevel(item) {
+  if (item.level === "warning" && isUnrecognizedEvent(item)) {
+    return "info";
+  }
+  return item.level || "info";
+}
+
+function isUnrecognizedEvent(item) {
+  const details = item.details || {};
+  const message = item.message || "";
+  return (
+    message.includes("未识别") ||
+    message.includes("had no text") ||
+    (details.sourceText != null && !String(details.sourceText).trim() && details.translatedText == null) ||
+    Number(details.segmentCount) === 0
+  );
+}
+
+function audioGroupType(group) {
+  const hasTranslation = group.items.some((item) => item.details?.translatedText != null);
+  const hasUnrecognized = group.items.some(isUnrecognizedEvent);
+  const hasTranscription = group.items.some(
+    (item) => item.details?.sourceText != null && String(item.details.sourceText).trim(),
+  );
+  if (hasUnrecognized && !hasTranslation) return "unrecognized";
+  if (hasTranslation) return "translated";
+  if (hasTranscription) return "transcribed";
+  return "unrecognized";
+}
+
+function matchesAudioGroupFilters(group, filters) {
+  if (filters.level && !group.items.some((item) => normalizedLogLevel(item) === filters.level)) {
+    return false;
+  }
+  if (filters.type && audioGroupType(group) !== filters.type) {
+    return false;
+  }
+  if (filters.from != null && group.latestAt < filters.from) {
+    return false;
+  }
+  if (filters.to != null && group.latestAt > filters.to) {
+    return false;
+  }
+  if (filters.ip) {
+    const hasIp = group.items.some((item) => String(item.details?.clientIp || "").includes(filters.ip));
+    if (!hasIp) return false;
+  }
+  return true;
+}
+
+function matchesFlatLogFilters(item, filters) {
+  if (filters.type) return false;
+  if (filters.level && normalizedLogLevel(item) !== filters.level) return false;
+  const timestamp = Date.parse(item.timestamp || 0) || 0;
+  if (filters.from != null && timestamp < filters.from) return false;
+  if (filters.to != null && timestamp > filters.to) return false;
+  if (filters.ip && !String(item.details?.clientIp || "").includes(filters.ip)) return false;
+  return true;
 }
 
 function renderTaskList(target, tasks, emptyText) {
@@ -436,6 +537,20 @@ async function refreshAll() {
     await Promise.all([refreshStatus(), refreshTasks(), refreshLogs()]);
   } finally {
     refreshBtn.disabled = false;
+  }
+}
+
+function renderCachedLogs() {
+  renderLogs(latestLogs);
+}
+
+function syncAutoRefresh() {
+  if (refreshTimer) {
+    clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
+  if (autoRefreshToggle.checked) {
+    refreshTimer = setInterval(refreshAll, 3500);
   }
 }
 
@@ -503,7 +618,11 @@ function renderValidation(result, target = customModelResult) {
 
 validateModelBtn.addEventListener("click", validateCustomModelPath);
 validateTranslationModelBtn.addEventListener("click", validateCustomTranslationModelPath);
-logLevelFilter.addEventListener("change", refreshLogs);
+for (const filter of [logLevelFilter, logTypeFilter, logFromFilter, logToFilter, logIpFilter]) {
+  filter.addEventListener("input", renderCachedLogs);
+  filter.addEventListener("change", renderCachedLogs);
+}
+autoRefreshToggle.addEventListener("change", syncAutoRefresh);
 
 customModelForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -592,5 +711,4 @@ document.querySelectorAll("[data-tab]").forEach((button) => {
     document.querySelector(`#tab-${button.dataset.tab}`).classList.add("active");
   });
 });
-setInterval(refreshAll, 3500);
 refreshAll();
