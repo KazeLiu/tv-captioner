@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import threading
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -17,6 +18,8 @@ RETENTION_DAYS = 10
 CLEANUP_INTERVAL_SECONDS = 60 * 60
 _lock = threading.RLock()
 _last_cleanup_at = 0.0
+_subscriber_lock = threading.RLock()
+_subscribers: set[queue.Queue[dict[str, Any]]] = set()
 
 
 def log_event(
@@ -45,6 +48,7 @@ def log_event(
         with LOG_FILE.open("a", encoding="utf-8") as output:
             output.write(json.dumps(event, ensure_ascii=False) + "\n")
 
+    _publish_event(event)
     return event
 
 
@@ -117,3 +121,29 @@ def _parse_timestamp(value: Any) -> datetime | None:
     if timestamp.tzinfo is None:
         return timestamp.replace(tzinfo=timezone.utc)
     return timestamp.astimezone(timezone.utc)
+
+
+def subscribe_events() -> queue.Queue[dict[str, Any]]:
+    subscriber: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=200)
+    with _subscriber_lock:
+        _subscribers.add(subscriber)
+    return subscriber
+
+
+def unsubscribe_events(subscriber: queue.Queue[dict[str, Any]]) -> None:
+    with _subscriber_lock:
+        _subscribers.discard(subscriber)
+
+
+def _publish_event(event: dict[str, Any]) -> None:
+    with _subscriber_lock:
+        subscribers = list(_subscribers)
+    for subscriber in subscribers:
+        try:
+            subscriber.put_nowait(event)
+        except queue.Full:
+            try:
+                subscriber.get_nowait()
+                subscriber.put_nowait(event)
+            except queue.Empty:
+                pass

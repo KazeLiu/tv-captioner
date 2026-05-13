@@ -141,6 +141,10 @@ ws://127.0.0.1:8765/api/live/ws?sourceLanguage=auto&targetLanguage=Chinese&asrMo
 
 连接建立后，前端持续发送二进制 PCM 块即可。建议每块 20-100ms，后端会为每个 WebSocket 连接维护独立缓冲区、VAD 状态和处理队列。Silero VAD 检测到人声结束后，若静音持续达到 `silenceMs`，后端会把当前句子送入 ASR；如果新闻主播连续说话没有明显停顿，后端也会在 `maxSegmentMs` 达到后强制切出一段，再带上上一段字幕上下文进行翻译。
 
+双 GPU 服务器可以显式选卡：`device=cuda&deviceIndex=1` 指定 ASR 使用第二张 GPU；GGUF 翻译如果开启 GPU 层数，则用 `nGpuLayers=<层数>&translationGpuIndex=1` 指定翻译主 GPU。强制 CPU 时用 `device=cpu&nGpuLayers=0`。
+
+如果客户端不传这些设备参数，后端会使用后台“直播”页签里的默认设备设置。对应接口是 `GET/PUT /api/live/defaults`，当前在线 WebSocket 连接可通过 `GET /api/live/connections` 查看；后台页面会用 `GET /api/live/connections/events` 的 SSE 长链接实时刷新，并显示最近几条转录/翻译文本。
+
 中文输出默认转成简体中文。可用 `chineseScript=simplified`、`chineseScript=traditional` 或 `chineseScript=original` 切换；`sourceLanguage=zh` 只表示中文语音，不负责区分简体/繁体。
 
 如果只需要实时语音转文字，不需要翻译模型，使用：
@@ -192,6 +196,11 @@ source_language=auto
 target_language=Chinese
 asr_model=large-v2
 translation_model=qwen2.5-1.5b-instruct-gguf
+device=cuda
+device_index=0
+compute_type=float16
+n_gpu_layers=0
+translation_gpu_index=0
 ```
 
 返回值里重点读：

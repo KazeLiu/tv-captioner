@@ -167,7 +167,7 @@ ws://127.0.0.1:8765/api/live/ws
 推荐完整示例：
 
 ```text
-ws://127.0.0.1:8765/api/live/ws?sourceLanguage=auto&targetLanguage=Chinese&asrModel=<ready-asr-model-key>&translationModel=<ready-translation-model-key>&codec=pcm_s16le&sampleRate=16000&channels=1&silenceMs=300&maxSegmentMs=5000&chineseScript=simplified
+ws://127.0.0.1:8765/api/live/ws?sourceLanguage=auto&targetLanguage=Chinese&asrModel=<ready-asr-model-key>&translationModel=<ready-translation-model-key>&codec=pcm_s16le&sampleRate=16000&channels=1&silenceMs=300&maxSegmentMs=5000&partialBeamSize=1&finalBeamSize=3&chineseScript=simplified
 ```
 
 查询参数：
@@ -178,9 +178,11 @@ targetLanguage      目标语言；默认 Chinese
 asrModel            ASR 模型 key，必须来自 ready ASR 模型
 translationModel    翻译模型 key，必须来自 ready 翻译模型
 device              faster-whisper device，默认 auto
+deviceIndex         faster-whisper GPU 编号，默认 0；双 GPU 时可传 1 指定第二张卡，device=cpu 时会被忽略
 computeType         faster-whisper compute_type，默认 auto
 nCtx                llama.cpp 上下文长度，默认 4096
 nGpuLayers          llama.cpp GPU 层数，默认 0
+translationGpuIndex llama.cpp 主 GPU 编号，默认 0；只有 nGpuLayers > 0 时有意义
 codec               当前只支持 pcm_s16le
 sampleRate          PCM 采样率，推荐 16000
 channels            声道数，支持 1 或 2，推荐 1
@@ -188,8 +190,26 @@ silenceMs           VAD 断句静音时长，默认 300，最小 200
 maxSegmentMs        单次最终转写音频最大时长，默认 5000；数字越大，最终 ASR 音频越长，对后端性能要求越高；新闻频道建议 4000-6000
 minSegmentMs        小于该时长的片段会丢弃，默认 300
 vadThreshold        VAD 阈值，默认 0.5
+partialBeamSize     临时字幕 ASR beam_size，默认 1，范围 1-5；数字越小越快
+finalBeamSize       最终修正字幕 ASR beam_size，默认 3，范围 1-5；数字越大越稳但返回越慢
 chineseScript       中文输出书写格式，默认 simplified；可选 simplified/traditional/original
 ```
+
+实时接口会先用 `partialBeamSize` 生成 `partial` 临时字幕，再用 `finalBeamSize` 生成最终 `segment` 修正字幕。后端性能弱时建议 `partialBeamSize=1`，`finalBeamSize=1` 或 `2`；后端性能较好时可尝试 `finalBeamSize=3` 或 `5`。
+
+双 GPU 服务器建议显式指定设备，避免运行库默认选择 0 号卡：
+
+```text
+device=cuda&deviceIndex=1&computeType=float16&nGpuLayers=35&translationGpuIndex=1
+```
+
+其中 `deviceIndex` 控制 faster-whisper/ASR 使用哪张 GPU，`translationGpuIndex` 控制 llama.cpp/GGUF 翻译主 GPU。只想用 CPU 时传：
+
+```text
+device=cpu&computeType=int8&nGpuLayers=0
+```
+
+如果客户端不传 `device`、`deviceIndex`、`computeType`、`nGpuLayers`、`translationGpuIndex`，后端会使用后台“直播默认设备”里保存的值。
 
 建立连接后，服务端先返回：
 
@@ -310,7 +330,7 @@ ws://127.0.0.1:8765/api/live/asr-ws
 完整示例：
 
 ```text
-ws://127.0.0.1:8765/api/live/asr-ws?sourceLanguage=auto&asrModel=<ready-asr-model-key>&codec=pcm_s16le&sampleRate=16000&channels=1&silenceMs=300&maxSegmentMs=5000&chineseScript=simplified
+ws://127.0.0.1:8765/api/live/asr-ws?sourceLanguage=auto&asrModel=<ready-asr-model-key>&codec=pcm_s16le&sampleRate=16000&channels=1&silenceMs=300&maxSegmentMs=5000&partialBeamSize=1&finalBeamSize=3&chineseScript=simplified
 ```
 
 查询参数：
@@ -319,6 +339,7 @@ ws://127.0.0.1:8765/api/live/asr-ws?sourceLanguage=auto&asrModel=<ready-asr-mode
 sourceLanguage      源语言；auto 或空字符串表示自动检测；也可传 ja/en/ko/zh 等
 asrModel            ASR 模型 key，必须来自 ready ASR 模型
 device              faster-whisper device，默认 auto
+deviceIndex         faster-whisper GPU 编号，默认 0；双 GPU 时可传 1 指定第二张卡，device=cpu 时会被忽略
 computeType         faster-whisper compute_type，默认 auto
 codec               当前只支持 pcm_s16le
 sampleRate          PCM 采样率，推荐 16000
@@ -327,8 +348,16 @@ silenceMs           VAD 断句静音时长，默认 300，最小 200
 maxSegmentMs        单次最终转写音频最大时长，默认 5000；数字越大，最终 ASR 音频越长，对后端性能要求越高；新闻频道建议 4000-6000
 minSegmentMs        小于该时长的片段会丢弃，默认 300
 vadThreshold        VAD 阈值，默认 0.5
+partialBeamSize     临时字幕 ASR beam_size，默认 1，范围 1-5；数字越小越快
+finalBeamSize       最终修正字幕 ASR beam_size，默认 3，范围 1-5；数字越大越稳但返回越慢
 chineseScript       中文输出书写格式，默认 simplified；可选 simplified/traditional/original
 ```
+
+实时 ASR-only 接口同样会先用 `partialBeamSize` 生成 `partial` 临时字幕，再用 `finalBeamSize` 生成最终 `segment` 修正字幕。后端性能弱时建议 `partialBeamSize=1`，`finalBeamSize=1` 或 `2`；后端性能较好时可尝试 `finalBeamSize=3` 或 `5`。
+
+双 GPU 服务器可传 `device=cuda&deviceIndex=1&computeType=float16` 指定 ASR 使用第二张 GPU；CPU 强制模式传 `device=cpu&computeType=int8`。
+
+如果客户端不传 `device`、`deviceIndex`、`computeType`，后端会使用后台“直播默认设备”里保存的 ASR 默认值。
 
 这个接口不需要传 `targetLanguage` 和 `translationModel`。
 
@@ -371,6 +400,111 @@ segments[].translation 不存在
 segments[].text
 ```
 
+## 直播默认设备和连接状态
+
+后台页面的“直播”页签会保存实时 WebSocket 的默认设备。TV 前端可以不传设备参数，让后端统一决定 CPU/GPU。
+
+### 获取直播默认设备
+
+```http
+GET /api/live/defaults
+```
+
+返回：
+
+```json
+{
+  "device": "cuda",
+  "deviceIndex": 1,
+  "computeType": "float16",
+  "nGpuLayers": 35,
+  "translationGpuIndex": 1
+}
+```
+
+### 保存直播默认设备
+
+```http
+PUT /api/live/defaults
+Content-Type: application/json
+```
+
+```json
+{
+  "device": "cuda",
+  "deviceIndex": 1,
+  "computeType": "float16",
+  "nGpuLayers": 35,
+  "translationGpuIndex": 1
+}
+```
+
+字段含义：
+
+```text
+device               ASR 设备，auto/cuda/cpu
+deviceIndex          ASR GPU 编号，从 0 开始
+computeType          ASR 计算类型，例如 auto/float16/int8_float16/int8
+nGpuLayers           GGUF 翻译 GPU 层数，0 表示不把翻译层放到 GPU
+translationGpuIndex  GGUF 翻译主 GPU 编号，从 0 开始
+```
+
+### 查看当前 WebSocket 连接
+
+```http
+GET /api/live/connections
+```
+
+返回当前仍在线的实时字幕连接。`recentTexts` 会保留最近几条临时/最终转录或翻译文本，后台页面会直接展示这些文本：
+
+```json
+[
+  {
+    "id": "xxxxxxxx",
+    "mode": "translate",
+    "clientIp": "192.168.1.79",
+    "connectedAt": 1760000000.0,
+    "connectedSeconds": 128.4,
+    "idleSeconds": 1.2,
+    "asrModel": "large-v2",
+    "translationModel": "qwen2.5-3b-instruct-gguf",
+    "device": "cuda",
+    "deviceIndex": 1,
+    "computeType": "float16",
+    "nGpuLayers": 35,
+    "translationGpuIndex": 1,
+    "receivedBytes": 409600,
+    "audioChunks": 320,
+    "streamSeconds": 32.0,
+    "partialCount": 18,
+    "segmentCount": 8,
+    "queuedSegments": 0,
+    "lastEvent": "segment",
+    "recentTexts": [
+      {
+        "type": "segment",
+        "id": "xxxxxxxx-7",
+        "at": 1760000128.0,
+        "sourceText": "recognized source text",
+        "translatedText": "最近翻译文本",
+        "displayText": "最近翻译文本"
+      }
+    ]
+  }
+]
+```
+
+### 实时订阅当前连接
+
+后台页面使用 SSE 长链接实时刷新连接状态：
+
+```http
+GET /api/live/connections/events
+Accept: text/event-stream
+```
+
+服务端大约每秒推送一次 `connections` 事件，`data` 内容与 `GET /api/live/connections` 返回结构一致。
+
 ## WebSocket 调用示例
 
 ### 双语字幕示例
@@ -391,6 +525,8 @@ async function startLiveCaptioning() {
     channels: "1",
     silenceMs: "300",
     maxSegmentMs: "5000",
+    partialBeamSize: "1",
+    finalBeamSize: "3",
     chineseScript: "simplified",
   });
 
@@ -449,6 +585,8 @@ async function startLiveTranscription() {
     channels: "1",
     silenceMs: "300",
     maxSegmentMs: "5000",
+    partialBeamSize: "1",
+    finalBeamSize: "3",
     chineseScript: "simplified",
   });
 
@@ -494,9 +632,11 @@ asr_model           ASR 模型 key
 translation_model   翻译模型 key
 audio_source        可选，仅用于日志
 device              默认 auto
+device_index        ASR GPU 编号，默认 0；device=cuda/auto 时用于指定 GPU，device=cpu 时忽略
 compute_type        默认 auto
 n_ctx               默认 4096
 n_gpu_layers        默认 0
+translation_gpu_index 翻译主 GPU 编号，默认 0；n_gpu_layers > 0 时用于指定 GGUF 翻译跑哪张卡
 chinese_script      中文输出书写格式，默认 simplified；可选 simplified/traditional/original
 ```
 
@@ -730,6 +870,8 @@ silenceMs 是否过大导致迟迟不断句。
 使用更小的 ASR 模型，例如 large-v3-turbo 或 small。
 使用更小的 GGUF 翻译模型。
 把 silenceMs 调到 300-400。
+后端性能弱时使用 partialBeamSize=1，finalBeamSize=1 或 2。
+后端性能较好时可尝试 finalBeamSize=3 或 5，提高最终字幕稳定性。
 新闻频道可以把 maxSegmentMs 调到 4000-6000，避免连续播报拖到十几秒才出字幕。
 有 partial 后可以适当调大 maxSegmentMs，让最终字幕更完整；但 maxSegmentMs 数字越大，单次最终 ASR 音频越长、后端压力越高，仍建议保留兜底切段。
 确保前端每 20-100ms 发送一次音频块。

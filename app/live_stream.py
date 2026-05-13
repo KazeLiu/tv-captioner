@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -20,6 +21,34 @@ from .translate import translate_segments
 
 
 VAD_SAMPLE_RATE = 16000
+_LIVE_CONNECTIONS: dict[str, dict[str, Any]] = {}
+_LIVE_CONNECTIONS_LOCK = threading.RLock()
+
+
+def list_live_connections() -> list[dict[str, Any]]:
+    now = time.time()
+    with _LIVE_CONNECTIONS_LOCK:
+        connections = []
+        for connection in _LIVE_CONNECTIONS.values():
+            connected_at = float(connection.get("connectedAt") or now)
+            updated_at = float(connection.get("updatedAt") or connected_at)
+            connections.append(
+                {
+                    **connection,
+                    "connectedSeconds": max(0.0, now - connected_at),
+                    "idleSeconds": max(0.0, now - updated_at),
+                }
+            )
+    return sorted(connections, key=lambda item: item.get("connectedAt", 0), reverse=True)
+
+
+def _update_live_connection(session_id: str, **changes: Any) -> None:
+    with _LIVE_CONNECTIONS_LOCK:
+        connection = _LIVE_CONNECTIONS.get(session_id)
+        if not connection:
+            return
+        connection.update(changes)
+        connection["updatedAt"] = time.time()
 
 
 def _text_preview(value: str, limit: int = 500) -> str:
@@ -32,6 +61,11 @@ def _text_preview(value: str, limit: int = 500) -> str:
 def _segments_preview(segments: list[dict[str, Any]], key: str) -> str:
     text = " ".join(str(segment.get(key) or "").strip() for segment in segments[:5]).strip()
     return _text_preview(text)
+
+
+def _segments_text(segments: list[dict[str, Any]], key: str, limit: int = 240) -> str:
+    text = " ".join(str(segment.get(key) or "").strip() for segment in segments if segment.get(key)).strip()
+    return _text_preview(text, limit=limit)
 
 
 _LIVE_ASR_HALLUCINATION_PHRASES = (
@@ -72,13 +106,17 @@ class LiveStreamConfig:
     source_language: str | None
     target_language: str
     asr_model_path: Path
+    asr_model_key: str = ""
     translation_model_path: Path | None = None
+    translation_model_key: str = ""
     translate_enabled: bool = True
     chinese_script: str = "simplified"
     device: str = "auto"
+    device_index: int = 0
     compute_type: str = "auto"
     n_ctx: int = 4096
     n_gpu_layers: int = 0
+    translation_gpu_index: int = 0
     codec: str = "pcm_s16le"
     sample_rate: int = 16000
     channels: int = 1
@@ -86,6 +124,8 @@ class LiveStreamConfig:
     max_segment_ms: int = 5000
     min_segment_ms: int = 300
     partial_interval_ms: int = 1000
+    partial_beam_size: int = 1
+    final_beam_size: int = 3
     vad_threshold: float = 0.5
 
 
@@ -168,6 +208,7 @@ class LiveAudioProcessor:
 
     async def run(self) -> None:
         await self.websocket.accept()
+        self._register_connection()
         await self._send_json(
             {
                 "type": "ready",
@@ -177,6 +218,11 @@ class LiveAudioProcessor:
                 "channels": self.config.channels,
                 "translationEnabled": self.config.translate_enabled,
                 "chineseScript": normalize_chinese_script(self.config.chinese_script),
+                "device": self.config.device,
+                "deviceIndex": self.config.device_index,
+                "computeType": self.config.compute_type,
+                "nGpuLayers": self.config.n_gpu_layers,
+                "translationGpuIndex": self.config.translation_gpu_index,
             }
         )
         log_event(
@@ -189,6 +235,11 @@ class LiveAudioProcessor:
                 "targetLanguage": self.config.target_language,
                 "translationEnabled": self.config.translate_enabled,
                 "chineseScript": normalize_chinese_script(self.config.chinese_script),
+                "device": self.config.device,
+                "deviceIndex": self.config.device_index,
+                "computeType": self.config.compute_type,
+                "nGpuLayers": self.config.n_gpu_layers,
+                "translationGpuIndex": self.config.translation_gpu_index,
                 "sampleRate": self.config.sample_rate,
                 "channels": self.config.channels,
                 "silenceMs": self.config.silence_ms,
@@ -203,6 +254,7 @@ class LiveAudioProcessor:
             await self._stop_partial_task()
             await self._queue.put(None)
             await worker
+            self._unregister_connection()
             log_event(
                 "info",
                 "WebSocket live session closed",
@@ -259,6 +311,13 @@ class LiveAudioProcessor:
         chunk_frames = len(content) // self._bytes_per_frame
         chunk_end_seconds = (self._stream_frames + chunk_frames) / self.config.sample_rate
         self._stream_frames += chunk_frames
+        self._update_connection_counters(
+            audioChunks=1,
+            receivedBytes=len(content),
+            streamSeconds=round(self._stream_frames / self.config.sample_rate, 3),
+            lastEvent="audio",
+            lastAudioAt=time.time(),
+        )
 
         self._append_limited(self._recent_buffer, content, self._recent_max_bytes)
         speech_end_offset = await asyncio.to_thread(self._detect_speech_end, bytes(self._recent_buffer))
@@ -290,6 +349,7 @@ class LiveAudioProcessor:
                 self._segment_start_seconds = max(0.0, chunk_end_seconds - preroll_seconds)
                 self._last_speech_seconds = detected_speech_end or chunk_end_seconds
                 await self._send_json({"type": "speech_start", "start": self._segment_start_seconds})
+                _update_live_connection(self.session_id, lastEvent="speech_start")
 
     async def _flush_current(self, forced: bool) -> None:
         if not self._in_speech or not self._segment_buffer:
@@ -311,9 +371,11 @@ class LiveAudioProcessor:
 
         if duration < self._min_segment_seconds:
             await self._send_json({"type": "speech_discarded", "id": utterance.id, "duration": duration})
+            _update_live_connection(self.session_id, lastEvent="speech_discarded")
             return
 
         await self._queue.put(utterance)
+        self._update_connection_counters(queuedSegments=1, lastEvent="speech_end")
         log_event(
             "info",
             "收到音频",
@@ -386,6 +448,7 @@ class LiveAudioProcessor:
                     "error": str(exc),
                 },
             )
+            self._update_connection_counters(errorCount=1, lastEvent="partial_error")
             return
         finally:
             task = asyncio.current_task()
@@ -395,6 +458,13 @@ class LiveAudioProcessor:
         if payload is None or not self._is_partial_current(snapshot):
             return
 
+        self._update_connection_counters(partialCount=1, lastEvent="partial")
+        self._append_recent_text(
+            kind="partial",
+            utterance_id=snapshot.final_id,
+            source_text=_segments_text(payload.get("segments") or [], "text"),
+            translated_text="",
+        )
         await self._send_json(payload)
 
     def _process_partial(self, snapshot: LivePartialSnapshot) -> dict[str, Any] | None:
@@ -415,9 +485,10 @@ class LiveAudioProcessor:
             model_path=self.config.asr_model_path,
             language=self.config.source_language,
             device=self.config.device,
+            device_index=self.config.device_index,
             compute_type=self.config.compute_type,
             update=update,
-            beam_size=1,
+            beam_size=self.config.partial_beam_size,
             vad_filter=False,
             condition_on_previous_text=False,
         )
@@ -475,6 +546,7 @@ class LiveAudioProcessor:
             if utterance is None:
                 return
             await self._send_json({"type": "processing", "id": utterance.id})
+            _update_live_connection(self.session_id, lastEvent="processing")
             try:
                 payload = await asyncio.to_thread(self._process_utterance, utterance)
             except Exception as exc:  # noqa: BLE001 - surfaced to WebSocket client
@@ -489,9 +561,11 @@ class LiveAudioProcessor:
                         "error": str(exc),
                     },
                 )
+                self._update_connection_counters(errorCount=1, queuedSegments=-1, lastEvent="error")
                 await self._send_json({"type": "error", "id": utterance.id, "message": str(exc)})
                 continue
 
+            self._update_connection_counters(segmentCount=1, queuedSegments=-1, lastEvent="segment")
             await self._send_json(payload)
 
     def _process_utterance(self, utterance: LiveUtterance) -> dict[str, Any]:
@@ -514,10 +588,11 @@ class LiveAudioProcessor:
             model_path=self.config.asr_model_path,
             language=requested_language,
             device=self.config.device,
+            device_index=self.config.device_index,
             compute_type=self.config.compute_type,
             update=update,
             initial_prompt=self._source_context or None,
-            beam_size=1,
+            beam_size=self.config.final_beam_size,
             vad_filter=False,
             condition_on_previous_text=False,
         )
@@ -564,6 +639,7 @@ class LiveAudioProcessor:
                 update=update,
                 n_ctx=self.config.n_ctx,
                 n_gpu_layers=self.config.n_gpu_layers,
+                main_gpu=self.config.translation_gpu_index,
                 previous_context=self._translation_context,
             )
             output_segments = convert_segment_texts(output_segments, self.config.chinese_script)
@@ -588,6 +664,12 @@ class LiveAudioProcessor:
             output_segments = segments
             self._update_context(output_segments)
 
+        self._append_recent_text(
+            kind="segment",
+            utterance_id=utterance.id,
+            source_text=_segments_text(output_segments, "text"),
+            translated_text=_segments_text(output_segments, "translation"),
+        )
         return {
             "type": "segment",
             "id": utterance.id,
@@ -600,6 +682,101 @@ class LiveAudioProcessor:
             "forced": utterance.forced,
             "segments": output_segments,
         }
+
+    def _register_connection(self) -> None:
+        now = time.time()
+        with _LIVE_CONNECTIONS_LOCK:
+            _LIVE_CONNECTIONS[self.session_id] = {
+                "id": self.session_id,
+                "status": "connected",
+                "mode": "translate" if self.config.translate_enabled else "asr",
+                "connectedAt": now,
+                "updatedAt": now,
+                "clientIp": self.client_ip,
+                "url": str(self.websocket.url),
+                "userAgent": self.websocket.headers.get("user-agent", ""),
+                "sourceLanguage": self.config.source_language or "auto",
+                "targetLanguage": self.config.target_language if self.config.translate_enabled else "",
+                "translationEnabled": self.config.translate_enabled,
+                "asrModel": self.config.asr_model_key,
+                "translationModel": self.config.translation_model_key if self.config.translate_enabled else "",
+                "device": self.config.device,
+                "deviceIndex": self.config.device_index,
+                "computeType": self.config.compute_type,
+                "nCtx": self.config.n_ctx,
+                "nGpuLayers": self.config.n_gpu_layers,
+                "translationGpuIndex": self.config.translation_gpu_index,
+                "codec": self.config.codec,
+                "sampleRate": self.config.sample_rate,
+                "channels": self.config.channels,
+                "silenceMs": self.config.silence_ms,
+                "maxSegmentMs": self.config.max_segment_ms,
+                "minSegmentMs": self.config.min_segment_ms,
+                "partialBeamSize": self.config.partial_beam_size,
+                "finalBeamSize": self.config.final_beam_size,
+                "vadThreshold": self.config.vad_threshold,
+                "chineseScript": normalize_chinese_script(self.config.chinese_script),
+                "audioChunks": 0,
+                "receivedBytes": 0,
+                "streamSeconds": 0,
+                "queuedSegments": 0,
+                "partialCount": 0,
+                "segmentCount": 0,
+                "errorCount": 0,
+                "recentTexts": [],
+                "lastEvent": "connected",
+            }
+
+    def _unregister_connection(self) -> None:
+        with _LIVE_CONNECTIONS_LOCK:
+            _LIVE_CONNECTIONS.pop(self.session_id, None)
+
+    def _update_connection_counters(self, **changes: Any) -> None:
+        with _LIVE_CONNECTIONS_LOCK:
+            connection = _LIVE_CONNECTIONS.get(self.session_id)
+            if not connection:
+                return
+            for key, value in changes.items():
+                if key in {
+                    "audioChunks",
+                    "receivedBytes",
+                    "partialCount",
+                    "segmentCount",
+                    "errorCount",
+                    "queuedSegments",
+                }:
+                    connection[key] = max(0, int(connection.get(key, 0)) + int(value))
+                else:
+                    connection[key] = value
+            connection["updatedAt"] = time.time()
+
+    def _append_recent_text(
+        self,
+        kind: str,
+        utterance_id: str,
+        source_text: str,
+        translated_text: str,
+    ) -> None:
+        text = translated_text or source_text
+        if not text:
+            return
+        with _LIVE_CONNECTIONS_LOCK:
+            connection = _LIVE_CONNECTIONS.get(self.session_id)
+            if not connection:
+                return
+            recent = list(connection.get("recentTexts") or [])
+            recent.append(
+                {
+                    "type": kind,
+                    "id": utterance_id,
+                    "at": time.time(),
+                    "sourceText": source_text,
+                    "translatedText": translated_text,
+                    "displayText": text,
+                }
+            )
+            connection["recentTexts"] = recent[-8:]
+            connection["updatedAt"] = time.time()
 
     def _update_context(self, segments: list[dict[str, Any]]) -> None:
         source_parts = [str(segment.get("text") or "").strip() for segment in segments]

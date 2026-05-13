@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-_LLAMA_CACHE: dict[tuple[str, int, int], Any] = {}
+_LLAMA_CACHE: dict[tuple[str, int, int, int], Any] = {}
 _LLAMA_CACHE_LOCK = threading.RLock()
 _LLAMA_INFERENCE_LOCK = threading.RLock()
 
@@ -26,8 +26,8 @@ def resolve_gguf_model_path(path: Path) -> Path:
     return gguf_files[0]
 
 
-def _llama(model_path: Path, n_ctx: int, n_gpu_layers: int) -> Any:
-    key = (str(model_path), n_ctx, n_gpu_layers)
+def _llama(model_path: Path, n_ctx: int, n_gpu_layers: int, main_gpu: int) -> Any:
+    key = (str(model_path), n_ctx, n_gpu_layers, main_gpu)
     with _LLAMA_CACHE_LOCK:
         if key in _LLAMA_CACHE:
             return _LLAMA_CACHE[key]
@@ -43,6 +43,7 @@ def _llama(model_path: Path, n_ctx: int, n_gpu_layers: int) -> Any:
             model_path=str(model_path),
             n_ctx=n_ctx,
             n_gpu_layers=n_gpu_layers,
+            main_gpu=main_gpu,
             verbose=False,
         )
         return _LLAMA_CACHE[key]
@@ -90,6 +91,7 @@ def translate_segments(
     update: Callable[..., None],
     n_ctx: int = 4096,
     n_gpu_layers: int = 0,
+    main_gpu: int = 0,
     previous_context: str = "",
     context_window_chars: int = 800,
 ) -> list[dict[str, Any]]:
@@ -98,7 +100,7 @@ def translate_segments(
 
     gguf_path = resolve_gguf_model_path(model_path)
     update(message=f"Loading translation model: {gguf_path.name}", progress=None)
-    llm = _llama(gguf_path, n_ctx=n_ctx, n_gpu_layers=n_gpu_layers)
+    llm = _llama(gguf_path, n_ctx=n_ctx, n_gpu_layers=n_gpu_layers, main_gpu=main_gpu)
 
     source = _language_label(source_language)
     rolling_context = _trim_context(previous_context, context_window_chars)

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import array
+import json
 import math
+import queue
 import shutil
 import sys
 import time
@@ -12,7 +15,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -36,6 +39,8 @@ from .custom_models import (
     custom_model_path,
     custom_translation_model_by_key,
     custom_translation_model_path,
+    delete_custom_model,
+    delete_custom_translation_model,
     load_custom_models,
     load_custom_translation_models,
     validate_custom_model_path,
@@ -43,9 +48,10 @@ from .custom_models import (
 )
 from .chinese import convert_segment_texts, normalize_chinese_script
 from .environment import environment_status
+from .live_defaults import load_live_defaults, save_live_defaults
 from .live_audio import create_live_session, get_live_session, list_live_sessions, save_live_chunk
-from .live_stream import LiveAudioProcessor, LiveStreamConfig
-from .logs import list_events, log_event
+from .live_stream import LiveAudioProcessor, LiveStreamConfig, list_live_connections
+from .logs import list_events, log_event, subscribe_events, unsubscribe_events
 from .tasks import TaskStore
 from .translate import translate_segments
 
@@ -81,6 +87,14 @@ class CustomTranslationModelCreate(BaseModel):
 
 class ModelPathValidate(BaseModel):
     path: str
+
+
+class LiveDefaultsUpdate(BaseModel):
+    device: str = "auto"
+    deviceIndex: int = 0
+    computeType: str = "auto"
+    nGpuLayers: int = 0
+    translationGpuIndex: int = 0
 
 
 def _validate_asr_model(asr_model: str) -> Path:
@@ -193,6 +207,31 @@ def _normalize_chinese_script_or_400(script: str | None) -> str:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+def _validate_nonnegative_index(value: int, name: str) -> int:
+    if value < 0:
+        raise HTTPException(status_code=400, detail=f"{name} must be greater than or equal to 0")
+    return value
+
+
+def _validate_live_defaults(payload: LiveDefaultsUpdate) -> dict:
+    device = payload.device.strip().lower() or "auto"
+    if device not in {"auto", "cuda", "cpu"}:
+        raise HTTPException(status_code=400, detail="device must be auto, cuda, or cpu")
+    compute_type = payload.computeType.strip() or "auto"
+    settings = {
+        "device": device,
+        "deviceIndex": _validate_nonnegative_index(payload.deviceIndex, "deviceIndex"),
+        "computeType": compute_type,
+        "nGpuLayers": _validate_nonnegative_index(payload.nGpuLayers, "nGpuLayers"),
+        "translationGpuIndex": _validate_nonnegative_index(payload.translationGpuIndex, "translationGpuIndex"),
+    }
+    return settings
+
+
+def _live_value(value, defaults: dict, key: str):
+    return defaults[key] if value is None else value
+
+
 def _asr_model_entries() -> list[dict]:
     return [
         *[builtin_asr_model_entry(key) for key in ASR_MODELS],
@@ -291,7 +330,14 @@ async def log_api_requests(request: Request, call_next):
         raise
 
     path = request.url.path
-    is_noisy_poll = path in {"/api/status", "/api/tasks", "/api/logs"} or path.startswith("/api/tasks/")
+    is_noisy_poll = path in {
+        "/api/status",
+        "/api/tasks",
+        "/api/logs",
+        "/api/logs/events",
+        "/api/live/connections",
+        "/api/live/connections/events",
+    } or path.startswith("/api/tasks/")
     if path.startswith("/api") and not is_noisy_poll:
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         level = "error" if response.status_code >= 500 else "warning" if response.status_code >= 400 else "info"
@@ -337,6 +383,51 @@ def get_logs(level: str | None = None, limit: int = 200) -> list[dict]:
     return list_events(level=level, limit=limit)
 
 
+@app.get("/api/logs/events")
+async def stream_logs() -> StreamingResponse:
+    async def events():
+        subscriber = subscribe_events()
+        try:
+            while True:
+                try:
+                    event = await asyncio.to_thread(subscriber.get, True, 15)
+                except queue.Empty:
+                    yield ": heartbeat\n\n"
+                    continue
+                payload = json.dumps(event, ensure_ascii=False)
+                yield f"event: log\ndata: {payload}\n\n"
+        finally:
+            unsubscribe_events(subscriber)
+
+    return StreamingResponse(events(), media_type="text/event-stream")
+
+
+@app.get("/api/live/defaults")
+def get_live_defaults() -> dict:
+    return load_live_defaults()
+
+
+@app.put("/api/live/defaults")
+def update_live_defaults(payload: LiveDefaultsUpdate) -> dict:
+    return save_live_defaults(_validate_live_defaults(payload))
+
+
+@app.get("/api/live/connections")
+def get_live_connections() -> list[dict]:
+    return list_live_connections()
+
+
+@app.get("/api/live/connections/events")
+async def stream_live_connections() -> StreamingResponse:
+    async def events():
+        while True:
+            payload = json.dumps(list_live_connections(), ensure_ascii=False)
+            yield f"event: connections\ndata: {payload}\n\n"
+            await asyncio.sleep(1)
+
+    return StreamingResponse(events(), media_type="text/event-stream")
+
+
 @app.get("/api/models")
 def list_models() -> dict:
     asr_models = _asr_model_entries()
@@ -377,6 +468,17 @@ def create_custom_asr_model(payload: CustomAsrModelCreate) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
+@app.delete("/api/models/asr/custom/{model_key:path}")
+def remove_custom_asr_model(model_key: str) -> dict:
+    try:
+        model = delete_custom_model(model_key)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Custom ASR model not found") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return {"deleted": True, "model": model}
+
+
 @app.post("/api/models/asr/validate")
 def validate_asr_model_path(payload: ModelPathValidate) -> dict:
     return validate_custom_model_path(payload.path)
@@ -398,6 +500,17 @@ def create_custom_translation_model(payload: CustomTranslationModelCreate) -> di
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@app.delete("/api/models/translate/custom/{model_key:path}")
+def remove_custom_translation_model(model_key: str) -> dict:
+    try:
+        model = delete_custom_translation_model(model_key)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Custom translation model not found") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return {"deleted": True, "model": model}
 
 
 @app.post("/api/models/translate/validate")
@@ -487,10 +600,12 @@ async def live_websocket(
     target_language: Annotated[str, Query(alias="targetLanguage")] = "Chinese",
     asr_model: Annotated[str, Query(alias="asrModel")] = "large-v2",
     translation_model: Annotated[str, Query(alias="translationModel")] = "qwen2.5-1.5b-instruct-gguf",
-    device: str = "auto",
-    compute_type: Annotated[str, Query(alias="computeType")] = "auto",
+    device: str | None = None,
+    device_index: Annotated[int | None, Query(alias="deviceIndex")] = None,
+    compute_type: Annotated[str | None, Query(alias="computeType")] = None,
     n_ctx: Annotated[int, Query(alias="nCtx")] = 4096,
-    n_gpu_layers: Annotated[int, Query(alias="nGpuLayers")] = 0,
+    n_gpu_layers: Annotated[int | None, Query(alias="nGpuLayers")] = None,
+    translation_gpu_index: Annotated[int | None, Query(alias="translationGpuIndex")] = None,
     codec: str = "pcm_s16le",
     sample_rate: Annotated[int, Query(alias="sampleRate")] = 16000,
     channels: int = 1,
@@ -498,9 +613,17 @@ async def live_websocket(
     max_segment_ms: Annotated[int, Query(alias="maxSegmentMs")] = 5000,
     min_segment_ms: Annotated[int, Query(alias="minSegmentMs")] = 300,
     vad_threshold: Annotated[float, Query(alias="vadThreshold")] = 0.5,
+    partial_beam_size: Annotated[int, Query(alias="partialBeamSize")] = 1,
+    final_beam_size: Annotated[int, Query(alias="finalBeamSize")] = 3,
     chinese_script: Annotated[str, Query(alias="chineseScript")] = "simplified",
 ) -> None:
     try:
+        live_defaults = load_live_defaults()
+        device = _live_value(device, live_defaults, "device")
+        device_index = _live_value(device_index, live_defaults, "deviceIndex")
+        compute_type = _live_value(compute_type, live_defaults, "computeType")
+        n_gpu_layers = _live_value(n_gpu_layers, live_defaults, "nGpuLayers")
+        translation_gpu_index = _live_value(translation_gpu_index, live_defaults, "translationGpuIndex")
         if codec != "pcm_s16le":
             raise HTTPException(status_code=400, detail="WebSocket live mode currently expects codec=pcm_s16le")
         if sample_rate <= 0:
@@ -509,8 +632,14 @@ async def live_websocket(
             raise HTTPException(status_code=400, detail="channels must be 1 or 2")
         if silence_ms < 200:
             raise HTTPException(status_code=400, detail="silenceMs must be at least 200")
+        if partial_beam_size < 1 or partial_beam_size > 5:
+            raise HTTPException(status_code=400, detail="partialBeamSize must be between 1 and 5")
+        if final_beam_size < 1 or final_beam_size > 5:
+            raise HTTPException(status_code=400, detail="finalBeamSize must be between 1 and 5")
         if not target_language.strip():
             raise HTTPException(status_code=400, detail="targetLanguage is required")
+        device_index = _validate_nonnegative_index(device_index, "deviceIndex")
+        translation_gpu_index = _validate_nonnegative_index(translation_gpu_index, "translationGpuIndex")
 
         asr_model_path_value = _validate_asr_model(asr_model)
         translation_model_path_value = _validate_translation_model(translation_model)
@@ -527,18 +656,24 @@ async def live_websocket(
             source_language=requested_language,
             target_language=target_language.strip(),
             asr_model_path=asr_model_path_value,
+            asr_model_key=asr_model,
             translation_model_path=translation_model_path_value,
+            translation_model_key=translation_model,
             chinese_script=_normalize_chinese_script_or_400(chinese_script),
             device=device,
+            device_index=device_index,
             compute_type=compute_type,
             n_ctx=n_ctx,
             n_gpu_layers=n_gpu_layers,
+            translation_gpu_index=translation_gpu_index,
             codec=codec,
             sample_rate=sample_rate,
             channels=channels,
             silence_ms=silence_ms,
             max_segment_ms=max_segment_ms,
             min_segment_ms=min_segment_ms,
+            partial_beam_size=partial_beam_size,
+            final_beam_size=final_beam_size,
             vad_threshold=vad_threshold,
         ),
     )
@@ -550,8 +685,9 @@ async def live_asr_websocket(
     websocket: WebSocket,
     source_language: Annotated[str, Query(alias="sourceLanguage")] = "",
     asr_model: Annotated[str, Query(alias="asrModel")] = "large-v2",
-    device: str = "auto",
-    compute_type: Annotated[str, Query(alias="computeType")] = "auto",
+    device: str | None = None,
+    device_index: Annotated[int | None, Query(alias="deviceIndex")] = None,
+    compute_type: Annotated[str | None, Query(alias="computeType")] = None,
     codec: str = "pcm_s16le",
     sample_rate: Annotated[int, Query(alias="sampleRate")] = 16000,
     channels: int = 1,
@@ -559,9 +695,15 @@ async def live_asr_websocket(
     max_segment_ms: Annotated[int, Query(alias="maxSegmentMs")] = 5000,
     min_segment_ms: Annotated[int, Query(alias="minSegmentMs")] = 300,
     vad_threshold: Annotated[float, Query(alias="vadThreshold")] = 0.5,
+    partial_beam_size: Annotated[int, Query(alias="partialBeamSize")] = 1,
+    final_beam_size: Annotated[int, Query(alias="finalBeamSize")] = 3,
     chinese_script: Annotated[str, Query(alias="chineseScript")] = "simplified",
 ) -> None:
     try:
+        live_defaults = load_live_defaults()
+        device = _live_value(device, live_defaults, "device")
+        device_index = _live_value(device_index, live_defaults, "deviceIndex")
+        compute_type = _live_value(compute_type, live_defaults, "computeType")
         if codec != "pcm_s16le":
             raise HTTPException(status_code=400, detail="WebSocket ASR mode currently expects codec=pcm_s16le")
         if sample_rate <= 0:
@@ -570,6 +712,11 @@ async def live_asr_websocket(
             raise HTTPException(status_code=400, detail="channels must be 1 or 2")
         if silence_ms < 200:
             raise HTTPException(status_code=400, detail="silenceMs must be at least 200")
+        if partial_beam_size < 1 or partial_beam_size > 5:
+            raise HTTPException(status_code=400, detail="partialBeamSize must be between 1 and 5")
+        if final_beam_size < 1 or final_beam_size > 5:
+            raise HTTPException(status_code=400, detail="finalBeamSize must be between 1 and 5")
+        device_index = _validate_nonnegative_index(device_index, "deviceIndex")
 
         asr_model_path_value = _validate_asr_model(asr_model)
     except HTTPException as exc:
@@ -584,10 +731,12 @@ async def live_asr_websocket(
             source_language=_normalize_source_language(source_language),
             target_language="",
             asr_model_path=asr_model_path_value,
+            asr_model_key=asr_model,
             translation_model_path=None,
             translate_enabled=False,
             chinese_script=_normalize_chinese_script_or_400(chinese_script),
             device=device,
+            device_index=device_index,
             compute_type=compute_type,
             codec=codec,
             sample_rate=sample_rate,
@@ -595,6 +744,8 @@ async def live_asr_websocket(
             silence_ms=silence_ms,
             max_segment_ms=max_segment_ms,
             min_segment_ms=min_segment_ms,
+            partial_beam_size=partial_beam_size,
+            final_beam_size=final_beam_size,
             vad_threshold=vad_threshold,
         ),
     )
@@ -612,14 +763,18 @@ def translate_audio_now(
     translation_model: Annotated[str, Form()] = "qwen2.5-1.5b-instruct-gguf",
     audio_source: Annotated[str, Form()] = "",
     device: Annotated[str, Form()] = "auto",
+    device_index: Annotated[int, Form()] = 0,
     compute_type: Annotated[str, Form()] = "auto",
     n_ctx: Annotated[int, Form()] = 4096,
     n_gpu_layers: Annotated[int, Form()] = 0,
+    translation_gpu_index: Annotated[int, Form()] = 0,
     chinese_script: Annotated[str, Form()] = "simplified",
 ) -> dict:
     request_id = uuid.uuid4().hex
     asr_model_path_value = _validate_asr_model(asr_model)
     translation_model_path_value = _validate_translation_model(translation_model)
+    device_index = _validate_nonnegative_index(device_index, "device_index")
+    translation_gpu_index = _validate_nonnegative_index(translation_gpu_index, "translation_gpu_index")
     media_path, label = _store_media(request_id, file, source_path)
     audio_stats = _audio_stats(media_path)
     requested_language = _normalize_source_language(source_language)
@@ -639,6 +794,11 @@ def translate_audio_now(
             "targetLanguage": target,
             "asrModel": asr_model,
             "translationModel": translation_model,
+            "device": device,
+            "deviceIndex": device_index,
+            "computeType": compute_type,
+            "nGpuLayers": n_gpu_layers,
+            "translationGpuIndex": translation_gpu_index,
             "chineseScript": output_chinese_script,
             "audioSource": audio_source.strip() or "unknown",
             "audioStats": audio_stats,
@@ -655,6 +815,7 @@ def translate_audio_now(
             model_path=asr_model_path_value,
             language=requested_language,
             device=device,
+            device_index=device_index,
             compute_type=compute_type,
             update=_scaled_update(update, 0.0, 0.55),
         )
@@ -683,6 +844,7 @@ def translate_audio_now(
             update=_scaled_update(update, 0.55, 0.43),
             n_ctx=n_ctx,
             n_gpu_layers=n_gpu_layers,
+            main_gpu=translation_gpu_index,
         )
         segments = convert_segment_texts(segments, output_chinese_script)
     except Exception as exc:
@@ -717,6 +879,11 @@ def translate_audio_now(
         "languageProbability": asr_result["languageProbability"],
         "targetLanguage": target,
         "chineseScript": output_chinese_script,
+        "device": device,
+        "deviceIndex": device_index,
+        "computeType": compute_type,
+        "nGpuLayers": n_gpu_layers,
+        "translationGpuIndex": translation_gpu_index,
         "duration": asr_result["duration"],
         "segmentCount": len(segments),
         "sourceText": source_text,
@@ -732,11 +899,13 @@ def create_transcription_job(
     source_language: Annotated[str, Form()] = "",
     asr_model: Annotated[str, Form()] = "large-v2",
     device: Annotated[str, Form()] = "auto",
+    device_index: Annotated[int, Form()] = 0,
     compute_type: Annotated[str, Form()] = "auto",
     chinese_script: Annotated[str, Form()] = "simplified",
 ) -> dict:
     job_id = uuid.uuid4().hex
     model_path = _validate_asr_model(asr_model)
+    device_index = _validate_nonnegative_index(device_index, "device_index")
     output_chinese_script = _normalize_chinese_script_or_400(chinese_script)
     media_path, label = _store_media(job_id, file, source_path)
     log_event(
@@ -748,6 +917,9 @@ def create_transcription_job(
             "label": label,
             "sourceLanguage": source_language or "auto",
             "asrModel": asr_model,
+            "device": device,
+            "deviceIndex": device_index,
+            "computeType": compute_type,
             "chineseScript": output_chinese_script,
             "mediaPath": str(media_path),
         },
@@ -763,6 +935,7 @@ def create_transcription_job(
                 model_path=model_path,
                 language=language,
                 device=device,
+                device_index=device_index,
                 compute_type=compute_type,
                 update=update,
             )
@@ -784,6 +957,9 @@ def create_transcription_job(
             payload = {
                 "mediaPath": str(media_path),
                 "asrModel": asr_model,
+                "device": device,
+                "deviceIndex": device_index,
+                "computeType": compute_type,
                 "sourceLanguage": asr_result["language"],
                 "languageProbability": asr_result["languageProbability"],
                 "duration": asr_result["duration"],
@@ -825,14 +1001,18 @@ def create_translation_test_job(
     asr_model: Annotated[str, Form()] = "large-v2",
     translation_model: Annotated[str, Form()] = "qwen2.5-1.5b-instruct-gguf",
     device: Annotated[str, Form()] = "auto",
+    device_index: Annotated[int, Form()] = 0,
     compute_type: Annotated[str, Form()] = "auto",
     n_ctx: Annotated[int, Form()] = 4096,
     n_gpu_layers: Annotated[int, Form()] = 0,
+    translation_gpu_index: Annotated[int, Form()] = 0,
     chinese_script: Annotated[str, Form()] = "simplified",
 ) -> dict:
     job_id = uuid.uuid4().hex
     asr_model_path_value = _validate_asr_model(asr_model)
     translation_model_path_value = _validate_translation_model(translation_model)
+    device_index = _validate_nonnegative_index(device_index, "device_index")
+    translation_gpu_index = _validate_nonnegative_index(translation_gpu_index, "translation_gpu_index")
     output_chinese_script = _normalize_chinese_script_or_400(chinese_script)
     media_path, label = _store_media(job_id, file, source_path)
     log_event(
@@ -846,6 +1026,11 @@ def create_translation_test_job(
             "targetLanguage": target_language,
             "asrModel": asr_model,
             "translationModel": translation_model,
+            "device": device,
+            "deviceIndex": device_index,
+            "computeType": compute_type,
+            "nGpuLayers": n_gpu_layers,
+            "translationGpuIndex": translation_gpu_index,
             "chineseScript": output_chinese_script,
             "mediaPath": str(media_path),
         },
@@ -861,6 +1046,7 @@ def create_translation_test_job(
                 model_path=asr_model_path_value,
                 language=requested_language,
                 device=device,
+                device_index=device_index,
                 compute_type=compute_type,
                 update=_scaled_update(update, 0.0, 0.55),
             )
@@ -889,6 +1075,7 @@ def create_translation_test_job(
                 update=_scaled_update(update, 0.55, 0.43),
                 n_ctx=n_ctx,
                 n_gpu_layers=n_gpu_layers,
+                main_gpu=translation_gpu_index,
             )
             segments = convert_segment_texts(segments, output_chinese_script)
             log_event(
@@ -909,6 +1096,11 @@ def create_translation_test_job(
                 "mediaPath": str(media_path),
                 "asrModel": asr_model,
                 "translationModel": translation_model,
+                "device": device,
+                "deviceIndex": device_index,
+                "computeType": compute_type,
+                "nGpuLayers": n_gpu_layers,
+                "translationGpuIndex": translation_gpu_index,
                 "sourceLanguage": detected_language,
                 "requestedSourceLanguage": requested_language or "auto",
                 "languageProbability": asr_result["languageProbability"],

@@ -10,15 +10,20 @@ import numpy as np
 from faster_whisper import WhisperModel
 
 
-_MODEL_CACHE: dict[tuple[str, str, str], WhisperModel] = {}
+_MODEL_CACHE: dict[tuple[str, str, str, int], WhisperModel] = {}
 _MODEL_CACHE_LOCK = threading.RLock()
 
 
-def _model(model_path: Path, device: str, compute_type: str) -> WhisperModel:
-    key = (str(model_path), device, compute_type)
+def _model(model_path: Path, device: str, compute_type: str, device_index: int) -> WhisperModel:
+    key = (str(model_path), device, compute_type, device_index)
     with _MODEL_CACHE_LOCK:
         if key not in _MODEL_CACHE:
-            _MODEL_CACHE[key] = WhisperModel(str(model_path), device=device, compute_type=compute_type)
+            _MODEL_CACHE[key] = WhisperModel(
+                str(model_path),
+                device=device,
+                device_index=device_index,
+                compute_type=compute_type,
+            )
         return _MODEL_CACHE[key]
 
 
@@ -72,6 +77,7 @@ def _transcribe(
     model_path: Path,
     language: str | None,
     device: str,
+    device_index: int,
     compute_type: str,
     update: Callable[..., None],
     initial_prompt: str | None = None,
@@ -80,7 +86,7 @@ def _transcribe(
     condition_on_previous_text: bool = True,
 ) -> dict[str, Any]:
     update(message="Loading ASR model", progress=None)
-    whisper = _model(model_path, device=device, compute_type=compute_type)
+    whisper = _model(model_path, device=device, device_index=device_index, compute_type=compute_type)
 
     kwargs: dict[str, Any] = {
         "beam_size": beam_size,
@@ -123,6 +129,7 @@ def transcribe_media(
     model_path: Path,
     language: str | None,
     device: str,
+    device_index: int,
     compute_type: str,
     update: Callable[..., None],
 ) -> dict[str, Any]:
@@ -131,6 +138,7 @@ def transcribe_media(
         model_path=model_path,
         language=language,
         device=device,
+        device_index=device_index,
         compute_type=compute_type,
         update=update,
     )
@@ -141,6 +149,7 @@ def transcribe_audio_array(
     model_path: Path,
     language: str | None,
     device: str,
+    device_index: int,
     compute_type: str,
     update: Callable[..., None],
     initial_prompt: str | None = None,
@@ -153,6 +162,7 @@ def transcribe_audio_array(
         model_path=model_path,
         language=language,
         device=device,
+        device_index=device_index,
         compute_type=compute_type,
         update=update,
         initial_prompt=initial_prompt,

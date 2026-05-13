@@ -77,6 +77,15 @@ def add_custom_model(key: str, label: str, path: str, description: str = "") -> 
     return model
 
 
+def delete_custom_model(model_key: str) -> dict[str, Any]:
+    model, remaining = _pop_custom_model(load_custom_models(), model_key)
+    validation = validate_custom_model_path(str(model.get("path", "")))
+    if validation["ok"]:
+        raise ValueError("模型路径里仍然有可用 ASR 模型，不能删除这个自定义记录。")
+    save_custom_models(remaining)
+    return {**model, "ready": False, "validation": validation}
+
+
 def add_custom_translation_model(key: str, label: str, path: str, description: str = "") -> dict[str, Any]:
     key = key.strip()
     label = label.strip() or key
@@ -107,6 +116,23 @@ def add_custom_translation_model(key: str, label: str, path: str, description: s
     models.append(model)
     save_custom_translation_models(models)
     return model
+
+
+def delete_custom_translation_model(model_key: str) -> dict[str, Any]:
+    model, remaining = _pop_custom_model(load_custom_translation_models(), model_key)
+    validation = validate_translation_model_path(str(model.get("path", "")))
+    if validation["ok"]:
+        raise ValueError("模型路径里仍然有可用 GGUF 模型，不能删除这个自定义记录。")
+    save_custom_translation_models(remaining)
+    return {**model, "ready": False, "validation": validation, "files": validation["files"], "custom": True}
+
+
+def _pop_custom_model(models: list[dict[str, Any]], model_key: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    key = model_key if model_key.startswith("custom:") else f"custom:{model_key}"
+    for index, model in enumerate(models):
+        if model.get("key") == key:
+            return model, [*models[:index], *models[index + 1 :]]
+    raise KeyError(key)
 
 
 def validate_custom_model_path(path_value: str) -> dict[str, Any]:

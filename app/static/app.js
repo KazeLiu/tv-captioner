@@ -13,6 +13,9 @@ const logFromFilter = document.querySelector("#logFromFilter");
 const logToFilter = document.querySelector("#logToFilter");
 const logIpFilter = document.querySelector("#logIpFilter");
 const autoRefreshToggle = document.querySelector("#autoRefreshToggle");
+const logPrevPageBtn = document.querySelector("#logPrevPageBtn");
+const logNextPageBtn = document.querySelector("#logNextPageBtn");
+const logPageInfo = document.querySelector("#logPageInfo");
 const refreshBtn = document.querySelector("#refreshBtn");
 const jobForm = document.querySelector("#jobForm");
 const customModelForm = document.querySelector("#customModelForm");
@@ -22,10 +25,20 @@ const customTranslationModelForm = document.querySelector("#customTranslationMod
 const customTranslationModelResult = document.querySelector("#customTranslationModelResult");
 const validateTranslationModelBtn = document.querySelector("#validateTranslationModelBtn");
 const translationTestForm = document.querySelector("#translationTestForm");
+const liveDefaultsForm = document.querySelector("#liveDefaultsForm");
+const liveDefaultsResult = document.querySelector("#liveDefaultsResult");
+const liveConnectionList = document.querySelector("#liveConnectionList");
+const refreshConnectionsBtn = document.querySelector("#refreshConnectionsBtn");
 let autoSelectedModel = false;
 let autoSelectedTranslationModel = false;
+let liveDefaultsLoaded = false;
 let latestLogs = [];
 let refreshTimer = null;
+let liveConnectionEvents = null;
+let logEvents = null;
+let logPage = 1;
+const LOG_PAGE_SIZE = 25;
+const highlightedLogKeys = new Set();
 
 const fmtBytes = (bytes) => {
   if (!bytes) return "0 B";
@@ -94,6 +107,18 @@ const taskStatus = (task) => {
   return `${statusLabels[task.status] || task.status}${progress}`;
 };
 
+const fmtDuration = (seconds) => {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (hours) return `${hours}小时${minutes}分${secs}秒`;
+  if (minutes) return `${minutes}分${secs}秒`;
+  return `${secs}秒`;
+};
+
+const fmtTime = (timestamp) => (timestamp ? new Date(timestamp * 1000).toLocaleString() : "-");
+
 async function refreshStatus() {
   const form = new FormData(jobForm);
   const asrModel = form.get("asr_model") || "large-v2";
@@ -138,7 +163,10 @@ async function refreshStatus() {
             ${issues}
           </details>
         </div>
-        ${model.url ? `<a class="action-link" href="${model.url}" target="_blank" rel="noreferrer">打开模型页</a>` : ""}
+        <div class="model-actions">
+          ${model.url ? `<a class="action-link" href="${model.url}" target="_blank" rel="noreferrer">打开模型页</a>` : ""}
+          ${deleteCustomModelButton(model, "asr")}
+        </div>
       </div>`,
     );
   }
@@ -171,10 +199,154 @@ async function refreshStatus() {
             ${issues}
           </details>
         </div>
-        ${model.url ? `<a class="action-link" href="${model.url}" target="_blank" rel="noreferrer">打开模型页</a>` : ""}
+        <div class="model-actions">
+          ${model.url ? `<a class="action-link" href="${model.url}" target="_blank" rel="noreferrer">打开模型页</a>` : ""}
+          ${deleteCustomModelButton(model, "translate")}
+        </div>
       </div>`,
     );
   }
+}
+
+function deleteCustomModelButton(model, type) {
+  if (!model.custom || model.ready) return "";
+  return `<button class="danger-button" type="button" data-delete-custom-model="${escapeHtml(model.key)}" data-model-type="${type}">删除记录</button>`;
+}
+
+async function refreshLiveDefaults(force = false) {
+  if (liveDefaultsLoaded && !force) return;
+  const response = await fetch("/api/live/defaults");
+  const defaults = await response.json();
+  liveDefaultsForm.elements.device.value = defaults.device || "auto";
+  liveDefaultsForm.elements.deviceIndex.value = defaults.deviceIndex ?? 0;
+  liveDefaultsForm.elements.computeType.value = defaults.computeType || "auto";
+  liveDefaultsForm.elements.nGpuLayers.value = defaults.nGpuLayers ?? 0;
+  liveDefaultsForm.elements.translationGpuIndex.value = defaults.translationGpuIndex ?? 0;
+  liveDefaultsLoaded = true;
+  liveDefaultsResult.textContent = "已加载";
+  liveDefaultsResult.className = "ready-badge ready";
+}
+
+async function saveLiveDefaults(event) {
+  event.preventDefault();
+  const data = new FormData(liveDefaultsForm);
+  const payload = {
+    device: data.get("device") || "auto",
+    deviceIndex: Number(data.get("deviceIndex") || 0),
+    computeType: data.get("computeType") || "auto",
+    nGpuLayers: Number(data.get("nGpuLayers") || 0),
+    translationGpuIndex: Number(data.get("translationGpuIndex") || 0),
+  };
+  liveDefaultsResult.textContent = "保存中";
+  liveDefaultsResult.className = "ready-badge pending";
+  const response = await fetch("/api/live/defaults", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    liveDefaultsResult.textContent = result.detail || "保存失败";
+    liveDefaultsResult.className = "ready-badge blocked";
+    return;
+  }
+  liveDefaultsLoaded = false;
+  await refreshLiveDefaults(true);
+  liveDefaultsResult.textContent = "已保存";
+}
+
+async function refreshLiveConnections() {
+  const response = await fetch("/api/live/connections");
+  const connections = await response.json();
+  renderLiveConnections(connections);
+}
+
+function renderLiveConnections(connections) {
+  const openDetails = new Set(
+    [...liveConnectionList.querySelectorAll(".connection details[open]")]
+      .map((details) => details.closest(".connection")?.dataset.connectionId)
+      .filter(Boolean),
+  );
+  liveConnectionList.innerHTML = "";
+  if (!connections.length) {
+    liveConnectionList.innerHTML = `<div class="tile"><strong>暂无直播连接</strong><div class="meta">WebSocket 连接建立后会出现在这里。</div></div>`;
+    return;
+  }
+  for (const connection of connections) {
+    const mode = connection.translationEnabled ? "双语字幕" : "只转写";
+    const title = `${mode} · ${String(connection.id || "").slice(0, 8)}`;
+    const device = `${connection.device || "auto"}:${connection.deviceIndex ?? 0} · ${connection.computeType || "auto"}`;
+    const translationGpu = connection.translationEnabled
+      ? ` · 翻译 GPU ${connection.translationGpuIndex ?? 0} · GPU 层 ${connection.nGpuLayers ?? 0}`
+      : "";
+    const recentTexts = renderRecentConnectionTexts(connection.recentTexts || []);
+    const isOpen = openDetails.has(connection.id) ? " open" : "";
+    liveConnectionList.insertAdjacentHTML(
+      "beforeend",
+      `<article class="connection" data-connection-id="${escapeHtml(connection.id || "")}">
+        <div>
+          <strong>${escapeHtml(title)}</strong>
+          <div class="meta">IP ${escapeHtml(connection.clientIp || "-")} · 已连接 ${escapeHtml(fmtDuration(connection.connectedSeconds))} · 空闲 ${escapeHtml(fmtDuration(connection.idleSeconds))}</div>
+          <div class="meta">ASR ${escapeHtml(connection.asrModel || "-")} · ${escapeHtml(device)}${escapeHtml(translationGpu)}</div>
+        </div>
+        ${recentTexts}
+        <details${isOpen}>
+          <summary>查看详情</summary>
+          <div class="meta">连接 ID：${escapeHtml(connection.id || "-")}</div>
+          <div class="meta">地址：${escapeHtml(connection.url || "-")}</div>
+          <div class="meta">建立时间：${escapeHtml(fmtTime(connection.connectedAt))}</div>
+          <div class="meta">最近活动：${escapeHtml(connection.lastEvent || "-")} · ${escapeHtml(fmtTime(connection.updatedAt))}</div>
+          <div class="meta">音频：${escapeHtml(fmtBytes(connection.receivedBytes))} · ${escapeHtml(connection.audioChunks || 0)} 块 · ${escapeHtml(fmtDuration(connection.streamSeconds))}</div>
+          <div class="meta">字幕：临时 ${escapeHtml(connection.partialCount || 0)} · 最终 ${escapeHtml(connection.segmentCount || 0)} · 队列 ${escapeHtml(connection.queuedSegments || 0)} · 错误 ${escapeHtml(connection.errorCount || 0)}</div>
+          <div class="meta">采样：${escapeHtml(connection.codec || "-")} · ${escapeHtml(connection.sampleRate || "-")} Hz · ${escapeHtml(connection.channels || "-")} 声道</div>
+          <div class="meta">断句：silenceMs=${escapeHtml(connection.silenceMs)} · maxSegmentMs=${escapeHtml(connection.maxSegmentMs)} · partialBeamSize=${escapeHtml(connection.partialBeamSize)} · finalBeamSize=${escapeHtml(connection.finalBeamSize)}</div>
+          <div class="meta">语言：${escapeHtml(connection.sourceLanguage || "auto")} → ${escapeHtml(connection.targetLanguage || "-")} · ${escapeHtml(connection.chineseScript || "simplified")}</div>
+          <div class="meta">User-Agent：${escapeHtml(connection.userAgent || "-")}</div>
+        </details>
+      </article>`,
+    );
+  }
+}
+
+function renderRecentConnectionTexts(recentTexts) {
+  if (!recentTexts.length) {
+    return `<div class="recent-texts empty">还没有识别文本</div>`;
+  }
+  const items = [...recentTexts]
+    .reverse()
+    .map((item) => {
+      const label = item.type === "partial" ? "临时" : "最终";
+      const translated = item.translatedText
+        ? `<div class="recent-translation">${escapeHtml(item.translatedText)}</div>`
+        : "";
+      const source = item.sourceText && item.sourceText !== item.translatedText
+        ? `<div class="recent-source">${escapeHtml(item.sourceText)}</div>`
+        : "";
+      return `<div class="recent-text">
+        <span>${escapeHtml(label)} · ${escapeHtml(fmtTime(item.at))}</span>
+        <strong>${escapeHtml(item.displayText || item.translatedText || item.sourceText || "")}</strong>
+        ${translated && source ? source : ""}
+      </div>`;
+    })
+    .join("");
+  return `<div class="recent-texts">${items}</div>`;
+}
+
+function connectLiveConnectionEvents() {
+  if (!window.EventSource || liveConnectionEvents) return;
+  liveConnectionEvents = new EventSource("/api/live/connections/events");
+  liveConnectionEvents.addEventListener("connections", (event) => {
+    try {
+      renderLiveConnections(JSON.parse(event.data));
+    } catch {
+      // Ignore one malformed event; the stream will send the next snapshot.
+    }
+  });
+  liveConnectionEvents.onerror = () => {
+    liveConnectionEvents.close();
+    liveConnectionEvents = null;
+    setTimeout(connectLiveConnectionEvents, 2500);
+  };
 }
 
 function syncAsrModelOptions(models) {
@@ -186,6 +358,7 @@ function syncAsrModelOptions(models) {
 
 function syncAsrModelSelect(select, models, allowAutoSelect) {
   const selected = select.value || "large-v2";
+  removeStaleCustomOptions(select, models);
   const existing = new Set([...select.options].map((option) => option.value));
   for (const model of models) {
     if (existing.has(model.key)) continue;
@@ -212,6 +385,7 @@ function syncTranslationModelOptions(models) {
   if (!translationTestForm) return;
   const select = translationTestForm.elements.translation_model;
   const selected = select.value || "qwen2.5-1.5b-instruct-gguf";
+  removeStaleCustomOptions(select, models);
   const existing = new Set([...select.options].map((option) => option.value));
   for (const model of models) {
     if (existing.has(model.key)) continue;
@@ -230,6 +404,15 @@ function syncTranslationModelOptions(models) {
   if (!autoSelectedTranslationModel && readyModel && (!selectedModel || !selectedModel.ready)) {
     autoSelectedTranslationModel = true;
     select.value = readyModel.key;
+  }
+}
+
+function removeStaleCustomOptions(select, models) {
+  const available = new Set(models.map((model) => model.key));
+  for (const option of [...select.options]) {
+    if (option.value.startsWith("custom:") && !available.has(option.value)) {
+      option.remove();
+    }
   }
 }
 
@@ -286,6 +469,7 @@ async function refreshLogs() {
   const params = new URLSearchParams({ limit: "1000" });
   const response = await fetch(`/api/logs?${params}`);
   latestLogs = await response.json();
+  logPage = 1;
   renderLogs(latestLogs);
 }
 
@@ -327,23 +511,32 @@ function renderLogs(logs) {
     .sort((a, b) => b.latestAt - a.latestAt);
   const filteredOtherLogs = otherLogs.filter((item) => matchesFlatLogFilters(item, filters));
 
-  if (groupedLogs.length) {
-    logList.insertAdjacentHTML("beforeend", `<div class="log-section-title">音频处理日志</div>`);
-    for (const group of groupedLogs) {
-      renderAudioLogGroup(group);
-    }
-  }
+  const entries = [
+    ...groupedLogs.map((group) => ({ type: "audio", latestAt: group.latestAt, payload: group })),
+    ...filteredOtherLogs.map((item) => ({
+      type: "flat",
+      latestAt: Date.parse(item.timestamp || 0) || 0,
+      payload: item,
+    })),
+  ].sort((a, b) => b.latestAt - a.latestAt);
 
-  if (filteredOtherLogs.length) {
-    logList.insertAdjacentHTML("beforeend", `<div class="log-section-title">接口和系统日志</div>`);
-    for (const item of filteredOtherLogs) {
-      renderFlatLog(item);
-    }
-  }
-
-  if (!groupedLogs.length && !filteredOtherLogs.length) {
+  if (!entries.length) {
     logList.innerHTML = `<div class="tile"><span>没有符合条件的日志</span><div class="meta">可以放宽时间、IP 或类别条件。</div></div>`;
+    updateLogPager(0);
+    return;
   }
+
+  const totalPages = Math.max(1, Math.ceil(entries.length / LOG_PAGE_SIZE));
+  logPage = Math.min(Math.max(1, logPage), totalPages);
+  const pageEntries = entries.slice((logPage - 1) * LOG_PAGE_SIZE, logPage * LOG_PAGE_SIZE);
+  for (const entry of pageEntries) {
+    if (entry.type === "audio") {
+      renderAudioLogGroup(entry.payload);
+    } else {
+      renderFlatLog(entry.payload);
+    }
+  }
+  updateLogPager(entries.length);
 }
 
 function renderAudioLogGroup(group) {
@@ -356,9 +549,10 @@ function renderAudioLogGroup(group) {
   const time = formatLogTime(received.timestamp);
   const ip = received.details?.clientIp || "-";
   const steps = group.items.map(renderAudioStep).join("");
+  const isNew = group.items.some((item) => highlightedLogKeys.has(logEventKey(item)));
   logList.insertAdjacentHTML(
     "beforeend",
-    `<article class="log-row audio-block ${escapeHtml(level)}">
+    `<article class="log-row audio-block ${escapeHtml(level)} ${isNew ? "is-new" : ""}">
       <div class="log-head">
         <span class="log-level">${escapeHtml(logLevelLabels[level] || level)}</span>
         <span class="meta">${escapeHtml(time)} · IP ${escapeHtml(ip)}</span>
@@ -412,12 +606,13 @@ function audioSourceLabel(value) {
 function renderFlatLog(item) {
   const level = item.level || "info";
   const time = formatLogTime(item.timestamp);
+  const isNew = highlightedLogKeys.has(logEventKey(item));
   const details = item.details && Object.keys(item.details).length
     ? `<pre>${escapeHtml(JSON.stringify(item.details, null, 2))}</pre>`
     : "";
   logList.insertAdjacentHTML(
     "beforeend",
-    `<article class="log-row ${escapeHtml(level)}">
+    `<article class="log-row ${escapeHtml(level)} ${isNew ? "is-new" : ""}">
       <div class="log-head">
         <span class="log-level">${escapeHtml(logLevelLabels[level] || level)}</span>
         <span class="meta">${escapeHtml(time)} · ${escapeHtml(item.category || "system")}</span>
@@ -429,7 +624,11 @@ function renderFlatLog(item) {
 }
 
 function formatLogTime(timestamp) {
-  return timestamp ? new Date(timestamp).toLocaleString() : "";
+  if (!timestamp) return "";
+  const date = new Date(timestamp);
+  if (!Number.isFinite(date.getTime())) return "";
+  const millis = String(date.getMilliseconds()).padStart(3, "0");
+  return `${date.toLocaleString()}.${millis}`;
 }
 
 function currentLogFilters() {
@@ -446,6 +645,64 @@ function parseLocalDateTime(value) {
   if (!value) return null;
   const time = new Date(value).getTime();
   return Number.isFinite(time) ? time : null;
+}
+
+function updateLogPager(totalItems) {
+  const totalPages = Math.max(1, Math.ceil(totalItems / LOG_PAGE_SIZE));
+  logPageInfo.textContent = `第 ${Math.min(logPage, totalPages)} / ${totalPages} 页 · ${totalItems} 条`;
+  logPrevPageBtn.disabled = logPage <= 1;
+  logNextPageBtn.disabled = logPage >= totalPages;
+}
+
+function logEventKey(item) {
+  const details = item.details || {};
+  return [
+    item.timestamp || "",
+    item.level || "",
+    item.category || "",
+    item.message || "",
+    details.requestId || "",
+    details.utteranceId || "",
+    details.statusCode || "",
+  ].join("|");
+}
+
+function addLogEvent(item) {
+  const key = logEventKey(item);
+  if (latestLogs.some((existing) => logEventKey(existing) === key)) return;
+  latestLogs.unshift(item);
+  latestLogs = latestLogs.slice(0, 1000);
+  highlightedLogKeys.add(key);
+  logPage = 1;
+  renderLogs(latestLogs);
+  setTimeout(() => {
+    highlightedLogKeys.delete(key);
+  }, 4500);
+}
+
+function connectLogEvents() {
+  if (!window.EventSource || logEvents || !autoRefreshToggle.checked) return;
+  logEvents = new EventSource("/api/logs/events");
+  logEvents.addEventListener("log", (event) => {
+    try {
+      addLogEvent(JSON.parse(event.data));
+    } catch {
+      // Ignore one malformed event; the stream will continue.
+    }
+  });
+  logEvents.onerror = () => {
+    logEvents.close();
+    logEvents = null;
+    if (autoRefreshToggle.checked) {
+      setTimeout(connectLogEvents, 2500);
+    }
+  };
+}
+
+function disconnectLogEvents() {
+  if (!logEvents) return;
+  logEvents.close();
+  logEvents = null;
 }
 
 function normalizedLogLevel(item) {
@@ -534,7 +791,7 @@ function renderTaskList(target, tasks, emptyText) {
 async function refreshAll() {
   refreshBtn.disabled = true;
   try {
-    await Promise.all([refreshStatus(), refreshTasks(), refreshLogs()]);
+    await Promise.all([refreshStatus(), refreshTasks(), refreshLogs(), refreshLiveDefaults(), refreshLiveConnections()]);
   } finally {
     refreshBtn.disabled = false;
   }
@@ -545,12 +802,10 @@ function renderCachedLogs() {
 }
 
 function syncAutoRefresh() {
-  if (refreshTimer) {
-    clearInterval(refreshTimer);
-    refreshTimer = null;
-  }
   if (autoRefreshToggle.checked) {
-    refreshTimer = setInterval(refreshAll, 3500);
+    connectLogEvents();
+  } else {
+    disconnectLogEvents();
   }
 }
 
@@ -589,6 +844,19 @@ async function validateCustomTranslationModelPath() {
   return result;
 }
 
+async function deleteCustomModel(key, type) {
+  const label = type === "translate" ? "自定义翻译模型" : "自定义 ASR 模型";
+  if (!confirm(`删除这个${label}记录？`)) return;
+  const base = type === "translate" ? "/api/models/translate/custom" : "/api/models/asr/custom";
+  const response = await fetch(`${base}/${encodeURIComponent(key)}`, { method: "DELETE" });
+  if (!response.ok) {
+    const result = await response.json();
+    alert(result.detail || "删除失败");
+    return;
+  }
+  await refreshAll();
+}
+
 function customModelPayload() {
   return {
     key: customModelForm.elements.key.value.trim(),
@@ -618,11 +886,39 @@ function renderValidation(result, target = customModelResult) {
 
 validateModelBtn.addEventListener("click", validateCustomModelPath);
 validateTranslationModelBtn.addEventListener("click", validateCustomTranslationModelPath);
+liveDefaultsForm.addEventListener("submit", saveLiveDefaults);
+refreshConnectionsBtn.addEventListener("click", refreshLiveConnections);
+for (const list of [modelList, translationModelList]) {
+  list.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-delete-custom-model]");
+    if (!button) return;
+    button.disabled = true;
+    try {
+      await deleteCustomModel(button.dataset.deleteCustomModel, button.dataset.modelType);
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
 for (const filter of [logLevelFilter, logTypeFilter, logFromFilter, logToFilter, logIpFilter]) {
-  filter.addEventListener("input", renderCachedLogs);
-  filter.addEventListener("change", renderCachedLogs);
+  filter.addEventListener("input", () => {
+    logPage = 1;
+    renderCachedLogs();
+  });
+  filter.addEventListener("change", () => {
+    logPage = 1;
+    renderCachedLogs();
+  });
 }
 autoRefreshToggle.addEventListener("change", syncAutoRefresh);
+logPrevPageBtn.addEventListener("click", () => {
+  logPage = Math.max(1, logPage - 1);
+  renderCachedLogs();
+});
+logNextPageBtn.addEventListener("click", () => {
+  logPage += 1;
+  renderCachedLogs();
+});
 
 customModelForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -661,6 +957,9 @@ customTranslationModelForm.addEventListener("submit", async (event) => {
 jobForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const selectedModel = jobForm.elements.asr_model.value;
+  const selectedDevice = jobForm.elements.device.value;
+  const selectedDeviceIndex = jobForm.elements.device_index.value;
+  const selectedComputeType = jobForm.elements.compute_type.value;
   const data = new FormData(jobForm);
   if (!data.get("file")?.name) {
     data.delete("file");
@@ -676,6 +975,9 @@ jobForm.addEventListener("submit", async (event) => {
   }
   jobForm.reset();
   jobForm.elements.asr_model.value = selectedModel;
+  jobForm.elements.device.value = selectedDevice;
+  jobForm.elements.device_index.value = selectedDeviceIndex;
+  jobForm.elements.compute_type.value = selectedComputeType;
   await refreshAll();
 });
 
@@ -683,6 +985,11 @@ translationTestForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const selectedAsrModel = translationTestForm.elements.asr_model.value;
   const selectedTranslationModel = translationTestForm.elements.translation_model.value;
+  const selectedDevice = translationTestForm.elements.device.value;
+  const selectedDeviceIndex = translationTestForm.elements.device_index.value;
+  const selectedComputeType = translationTestForm.elements.compute_type.value;
+  const selectedGpuLayers = translationTestForm.elements.n_gpu_layers.value;
+  const selectedTranslationGpuIndex = translationTestForm.elements.translation_gpu_index.value;
   const data = new FormData(translationTestForm);
   if (!data.get("file")?.name) {
     data.delete("file");
@@ -699,10 +1006,17 @@ translationTestForm.addEventListener("submit", async (event) => {
   translationTestForm.reset();
   translationTestForm.elements.asr_model.value = selectedAsrModel;
   translationTestForm.elements.translation_model.value = selectedTranslationModel;
+  translationTestForm.elements.device.value = selectedDevice;
+  translationTestForm.elements.device_index.value = selectedDeviceIndex;
+  translationTestForm.elements.compute_type.value = selectedComputeType;
+  translationTestForm.elements.n_gpu_layers.value = selectedGpuLayers;
+  translationTestForm.elements.translation_gpu_index.value = selectedTranslationGpuIndex;
   await refreshAll();
 });
 
 refreshBtn.addEventListener("click", refreshAll);
+connectLiveConnectionEvents();
+syncAutoRefresh();
 document.querySelectorAll("[data-tab]").forEach((button) => {
   button.addEventListener("click", () => {
     document.querySelectorAll("[data-tab]").forEach((item) => item.classList.remove("active"));

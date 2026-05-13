@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>TV Captioner Backend</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260513-log-filters-2" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260513-live-settings-log-stream" />
   </head>
   <body>
     <main class="shell">
@@ -19,6 +19,7 @@
       <div class="tabs" role="tablist" aria-label="功能区">
         <button class="tab active" type="button" data-tab="transcribe">转写</button>
         <button class="tab" type="button" data-tab="translate">翻译</button>
+        <button class="tab" type="button" data-tab="live">直播</button>
         <button class="tab" type="button" data-tab="logs">日志</button>
       </div>
 
@@ -60,7 +61,7 @@
         </section>
 
         <section class="band">
-          <h2>转写任务</h2>
+          <h2>转写测试</h2>
           <form id="jobForm" class="job-form">
             <label>
               媒体文件
@@ -111,6 +112,10 @@
                 </select>
               </label>
               <label>
+                GPU 编号
+                <input name="device_index" type="number" min="0" step="1" value="0" />
+              </label>
+              <label>
                 计算类型
                 <select name="compute_type">
                   <option value="auto">auto</option>
@@ -127,7 +132,7 @@
         </section>
 
         <section class="band">
-          <h2>转写任务队列</h2>
+          <h2>转写测试队列</h2>
           <div id="taskList" class="task-list"></div>
         </section>
       </section>
@@ -241,6 +246,10 @@
                 </select>
               </label>
               <label>
+                ASR GPU 编号
+                <input name="device_index" type="number" min="0" step="1" value="0" />
+              </label>
+              <label>
                 计算类型
                 <select name="compute_type">
                   <option value="auto">auto</option>
@@ -257,6 +266,10 @@
                 GPU 层数
                 <input name="n_gpu_layers" type="number" min="0" step="1" value="0" />
               </label>
+              <label>
+                翻译 GPU 编号
+                <input name="translation_gpu_index" type="number" min="0" step="1" value="0" />
+              </label>
             </div>
             <div class="actions">
               <button type="submit">开始翻译测试</button>
@@ -265,8 +278,61 @@
         </section>
 
         <section class="band">
-          <h2>翻译任务队列</h2>
+          <h2>翻译测试队列</h2>
           <div id="translationTaskList" class="task-list"></div>
+        </section>
+      </section>
+
+      <section id="tab-live" class="tab-panel">
+        <section class="band">
+          <div class="section-title">
+            <h2>直播默认设备</h2>
+            <div id="liveDefaultsResult" class="ready-badge pending">未保存</div>
+          </div>
+          <form id="liveDefaultsForm" class="job-form">
+            <div class="grid">
+              <label>
+                ASR 设备
+                <select name="device">
+                  <option value="auto">auto</option>
+                  <option value="cuda">cuda</option>
+                  <option value="cpu">cpu</option>
+                </select>
+              </label>
+              <label>
+                ASR GPU 编号
+                <input name="deviceIndex" type="number" min="0" step="1" value="0" />
+              </label>
+              <label>
+                ASR 计算类型
+                <select name="computeType">
+                  <option value="auto">auto</option>
+                  <option value="float16">float16</option>
+                  <option value="int8_float16">int8_float16</option>
+                  <option value="int8">int8</option>
+                </select>
+              </label>
+              <label>
+                翻译 GPU 层数
+                <input name="nGpuLayers" type="number" min="0" step="1" value="0" />
+              </label>
+              <label>
+                翻译 GPU 编号
+                <input name="translationGpuIndex" type="number" min="0" step="1" value="0" />
+              </label>
+            </div>
+            <div class="actions">
+              <button type="submit">保存默认设备</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="band">
+          <div class="section-title">
+            <h2>当前直播连接</h2>
+            <button id="refreshConnectionsBtn" type="button">刷新连接</button>
+          </div>
+          <div id="liveConnectionList" class="connection-list"></div>
         </section>
       </section>
 
@@ -275,7 +341,7 @@
           <div class="section-title log-title">
             <h2>运行日志</h2>
             <label class="check inline-check">
-              <input id="autoRefreshToggle" type="checkbox" />
+              <input id="autoRefreshToggle" type="checkbox" checked />
               自动刷新
             </label>
           </div>
@@ -311,11 +377,16 @@
               <input id="logIpFilter" type="search" placeholder="192.168.1.79" />
             </label>
           </div>
+          <div class="log-pager">
+            <button id="logPrevPageBtn" type="button">上一页</button>
+            <span id="logPageInfo">第 1 页</span>
+            <button id="logNextPageBtn" type="button">下一页</button>
+          </div>
           <div id="logList" class="log-list"></div>
         </section>
       </section>
     </main>
 
-    <script src="/static/app.js?v=20260513-log-filters-2"></script>
+    <script src="/static/app.js?v=20260513-live-settings-log-stream"></script>
   </body>
 </html>

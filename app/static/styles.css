@@ -139,6 +139,7 @@ p {
 .model-list,
 .task-list,
 .log-list,
+.connection-list,
 .checklist {
   display: grid;
   gap: 10px;
@@ -151,6 +152,7 @@ p {
 .tile,
 .model,
 .task,
+.connection,
 .log-row,
 .check-item {
   border: 1px solid #d8d0c3;
@@ -191,6 +193,19 @@ p {
 .model-main {
   display: grid;
   gap: 6px;
+}
+
+.model-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.danger-button {
+  border-color: #d9a7a0;
+  background: #fff5f3;
+  color: #9b2f25;
 }
 
 details {
@@ -311,6 +326,47 @@ select {
   gap: 8px;
 }
 
+.connection {
+  display: grid;
+  gap: 10px;
+}
+
+.recent-texts {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid #ede6dc;
+  padding-top: 10px;
+}
+
+.recent-texts.empty {
+  color: #68736d;
+  font-size: 13px;
+}
+
+.recent-text {
+  display: grid;
+  gap: 4px;
+}
+
+.recent-text span {
+  color: #68736d;
+  font-size: 12px;
+}
+
+.recent-text strong {
+  color: #24302b;
+  font-size: 14px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.recent-source {
+  color: #68736d;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 .links {
   display: flex;
   flex-wrap: wrap;
@@ -344,6 +400,20 @@ select {
   min-height: 18px;
 }
 
+.log-pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.log-pager span {
+  color: #59645f;
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .log-filters {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -355,6 +425,23 @@ select {
   display: grid;
   gap: 8px;
   border-left-width: 5px;
+}
+
+.log-row.is-new {
+  animation: log-slide-in 420ms ease-out;
+}
+
+@keyframes log-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(-12px);
+    background: #eaf4ef;
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .log-section-title {
