@@ -7,7 +7,7 @@ from typing import Any
 
 
 APP_NAME = "TV Captioner Backend"
-APP_VERSION = "0.1.4"
+APP_VERSION = "0.2"
 
 
 def version_info() -> dict[str, Any]:

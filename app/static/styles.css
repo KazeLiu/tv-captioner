@@ -16,7 +16,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -100,8 +101,20 @@ p {
   display: block;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 .section-note {
   margin-bottom: 14px;
+}
+
+.section-note span {
+  display: block;
+}
+
+.section-note span + span {
+  margin-top: 4px;
 }
 
 .section-title {
@@ -296,6 +309,20 @@ summary {
   gap: 14px;
 }
 
+.online-provider-form {
+  display: grid;
+  gap: 14px;
+}
+
+.provider-card {
+  display: grid;
+  gap: 14px;
+  border: 1px solid #d8d0c3;
+  border-radius: 8px;
+  background: #fffdf9;
+  padding: 16px;
+}
+
 .advanced-settings {
   border-top: 1px solid #ede6dc;
   padding-top: 10px;
@@ -345,7 +372,8 @@ label {
 }
 
 input,
-select {
+select,
+textarea {
   width: 100%;
   min-height: 40px;
   border: 1px solid #cfc7bc;
@@ -353,6 +381,12 @@ select {
   padding: 8px 10px;
   background: #fff;
   color: #1c2421;
+}
+
+textarea {
+  min-height: 150px;
+  line-height: 1.5;
+  resize: vertical;
 }
 
 .check {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import re
 import threading
@@ -14,10 +15,17 @@ import numpy as np
 from fastapi import WebSocket, WebSocketDisconnect
 from faster_whisper.vad import VadOptions, get_speech_timestamps
 
-from .asr import asr_runtime_status, transcribe_audio_array
+from .asr import asr_runtime_status, clear_asr_model_cache, transcribe_audio_array
 from .chinese import convert_segment_texts, normalize_chinese_script
 from .logs import log_event
-from .translate import cached_gguf_runtime, gguf_runtime_status, resolve_gguf_model_path, translate_segments
+from .translate import (
+    cached_gguf_runtime,
+    clear_gguf_model_cache,
+    gguf_runtime_status,
+    resolve_gguf_model_path,
+    translate_segments,
+    translate_segments_online,
+)
 
 
 VAD_SAMPLE_RATE = 16000
@@ -120,6 +128,8 @@ class LiveStreamConfig:
     asr_model_key: str = ""
     translation_model_path: Path | None = None
     translation_model_key: str = ""
+    translation_engine: str = "local"
+    online_translation_settings: dict[str, Any] | None = None
     translate_enabled: bool = True
     chinese_script: str = "simplified"
     device: str = "auto"
@@ -194,6 +204,7 @@ class LiveAudioProcessor:
         self.client_ip = websocket.client.host if websocket.client else ""
         self._queue: asyncio.Queue[LiveUtterance | None] = asyncio.Queue()
         self._send_lock = asyncio.Lock()
+        self._cancel_requested = threading.Event()
         self._segment_buffer = bytearray()
         self._recent_buffer = bytearray()
         self._pre_speech_buffer = bytearray()
@@ -210,7 +221,7 @@ class LiveAudioProcessor:
         self._detected_language: str | None = None
         self._translation_gguf_path = (
             resolve_gguf_model_path(config.translation_model_path)
-            if config.translate_enabled and config.translation_model_path
+            if config.translate_enabled and config.translation_engine == "local" and config.translation_model_path
             else None
         )
 
@@ -233,6 +244,7 @@ class LiveAudioProcessor:
                 "sampleRate": self.config.sample_rate,
                 "channels": self.config.channels,
                 "translationEnabled": self.config.translate_enabled,
+                "translationEngine": self.config.translation_engine if self.config.translate_enabled else None,
                 "chineseScript": normalize_chinese_script(self.config.chinese_script),
                 "device": self.config.device,
                 "deviceIndex": self.config.device_index,
@@ -250,6 +262,7 @@ class LiveAudioProcessor:
                 "sourceLanguage": self.config.source_language or "auto",
                 "targetLanguage": self.config.target_language,
                 "translationEnabled": self.config.translate_enabled,
+                "translationEngine": self.config.translation_engine if self.config.translate_enabled else None,
                 "chineseScript": normalize_chinese_script(self.config.chinese_script),
                 "device": self.config.device,
                 "deviceIndex": self.config.device_index,
@@ -267,15 +280,18 @@ class LiveAudioProcessor:
         try:
             await self._receive_loop()
         finally:
+            self._cancel_pending_work("连接已断开，已取消未处理队列")
             idle_monitor.cancel()
             try:
                 await idle_monitor
             except asyncio.CancelledError:
                 pass
-            await self._flush_current(forced=True)
             await self._stop_partial_task()
-            await self._queue.put(None)
-            await worker
+            worker.cancel()
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
             self._unregister_connection()
             log_event(
                 "info",
@@ -409,6 +425,8 @@ class LiveAudioProcessor:
                 _update_live_connection(self.session_id, lastEvent="speech_start")
 
     async def _flush_current(self, forced: bool) -> None:
+        if self._cancel_requested.is_set():
+            return
         if not self._in_speech or not self._segment_buffer:
             return
 
@@ -598,15 +616,81 @@ class LiveAudioProcessor:
         except asyncio.CancelledError:
             pass
 
+    def _cancel_pending_work(self, reason: str) -> None:
+        self._cancel_requested.set()
+        self._in_speech = False
+        self._partial_generation += 1
+        self._segment_buffer = bytearray()
+        self._pre_speech_buffer = bytearray()
+
+        cancelled_count = 0
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if item is not None:
+                cancelled_count += 1
+
+        now = time.time()
+        with _LIVE_CONNECTIONS_LOCK:
+            connection = _LIVE_CONNECTIONS.get(self.session_id)
+            if not connection:
+                return
+            current = dict(connection.get("currentProcessing") or {})
+            if current:
+                current.update(
+                    {
+                        "status": "cancelling",
+                        "message": "连接已断开，正在停止当前任务",
+                        "updatedAt": now,
+                    }
+                )
+                connection["currentProcessing"] = current
+            connection["pendingUtterances"] = []
+            connection["queuedSegments"] = 0
+            connection["lastEvent"] = "cancelled"
+            connection["updatedAt"] = now
+
+        self._append_processing_log(
+            reason,
+            level="warning",
+            cancelledQueuedSegments=cancelled_count,
+        )
+        log_event(
+            "info",
+            "WebSocket live pending work cancelled",
+            category="live",
+            details={
+                "sessionId": self.session_id,
+                "clientIp": self.client_ip,
+                "cancelledQueuedSegments": cancelled_count,
+            },
+        )
+
     async def _process_queue(self) -> None:
         while True:
             utterance = await self._queue.get()
             if utterance is None:
                 return
+            if self._cancel_requested.is_set():
+                self._finish_processing_utterance(
+                    utterance,
+                    status="cancelled",
+                    message="连接已断开，已取消处理",
+                )
+                continue
             await self._send_json({"type": "processing", "id": utterance.id})
             self._start_processing_utterance(utterance)
             try:
                 payload = await asyncio.to_thread(self._process_utterance, utterance)
+            except asyncio.CancelledError:
+                self._finish_processing_utterance(
+                    utterance,
+                    status="cancelled",
+                    message="连接已断开，已停止等待当前任务",
+                )
+                raise
             except Exception as exc:  # noqa: BLE001 - surfaced to WebSocket client
                 log_event(
                     "error",
@@ -640,6 +724,14 @@ class LiveAudioProcessor:
             await self._send_json(payload)
 
     def _process_utterance(self, utterance: LiveUtterance) -> dict[str, Any]:
+        if self._cancel_requested.is_set():
+            return {
+                "type": "segment",
+                "id": utterance.id,
+                "segments": [],
+                "cancelled": True,
+            }
+
         audio = pcm_s16le_to_float32(
             utterance.audio,
             sample_rate=self.config.sample_rate,
@@ -657,6 +749,7 @@ class LiveAudioProcessor:
                 "Loading ASR model": "正在加载 ASR 模型",
                 "Transcribing media": "正在转写音频",
                 "Translating subtitles": "正在翻译字幕",
+                "Translation cancelled": "连接已断开，已停止后续翻译",
             }
             if message.startswith("Loading translation model:"):
                 model_name = message.replace("Loading translation model:", "").strip()
@@ -722,27 +815,68 @@ class LiveAudioProcessor:
             },
         )
 
-        if self.config.translate_enabled and self.config.translation_model_path:
-            output_segments = translate_segments(
-                segments=segments,
-                model_path=self._translation_gguf_path or self.config.translation_model_path,
-                source_language=requested_language or detected_language,
-                target_language=self.config.target_language,
-                update=update,
-                n_ctx=self.config.n_ctx,
-                n_gpu_layers=self.config.n_gpu_layers,
-                main_gpu=self.config.translation_gpu_index,
-                previous_context=self._translation_context,
+        if self._cancel_requested.is_set():
+            log_event(
+                "info",
+                "直播连接已断开，跳过后续翻译",
+                category="live",
+                details={
+                    "sessionId": self.session_id,
+                    "utteranceId": utterance.id,
+                    "clientIp": self.client_ip,
+                    "sourceLanguage": detected_language or "auto",
+                    "segmentCount": len(segments),
+                },
             )
-            if self._translation_gguf_path:
-                self._set_runtime_status(
-                    translation_runtime=cached_gguf_runtime(
-                        self._translation_gguf_path,
-                        self.config.n_ctx,
-                        self.config.n_gpu_layers,
-                        self.config.translation_gpu_index,
-                    )
+            return {
+                "type": "segment",
+                "id": utterance.id,
+                "sourceLanguage": detected_language,
+                "targetLanguage": self.config.target_language if self.config.translate_enabled else None,
+                "translationEnabled": False,
+                "chineseScript": normalize_chinese_script(self.config.chinese_script),
+                "start": utterance.start,
+                "end": utterance.end,
+                "forced": utterance.forced,
+                "segments": segments,
+                "cancelled": True,
+            }
+
+        if self.config.translate_enabled and (
+            self.config.translation_model_path or self.config.online_translation_settings
+        ):
+            if self.config.translation_engine == "online":
+                output_segments = translate_segments_online(
+                    segments=segments,
+                    settings=self.config.online_translation_settings or {},
+                    source_language=requested_language or detected_language,
+                    target_language=self.config.target_language,
+                    update=update,
+                    previous_context=self._translation_context,
+                    cancelled=self._cancel_requested.is_set,
                 )
+            else:
+                output_segments = translate_segments(
+                    segments=segments,
+                    model_path=self._translation_gguf_path or self.config.translation_model_path,
+                    source_language=requested_language or detected_language,
+                    target_language=self.config.target_language,
+                    update=update,
+                    n_ctx=self.config.n_ctx,
+                    n_gpu_layers=self.config.n_gpu_layers,
+                    main_gpu=self.config.translation_gpu_index,
+                    previous_context=self._translation_context,
+                    cancelled=self._cancel_requested.is_set,
+                )
+                if self._translation_gguf_path:
+                    self._set_runtime_status(
+                        translation_runtime=cached_gguf_runtime(
+                            self._translation_gguf_path,
+                            self.config.n_ctx,
+                            self.config.n_gpu_layers,
+                            self.config.translation_gpu_index,
+                        )
+                    )
             output_segments = convert_segment_texts(output_segments, self.config.chinese_script)
             self._update_context(output_segments)
             log_event(
@@ -800,6 +934,7 @@ class LiveAudioProcessor:
                 "sourceLanguage": self.config.source_language or "auto",
                 "targetLanguage": self.config.target_language if self.config.translate_enabled else "",
                 "translationEnabled": self.config.translate_enabled,
+                "translationEngine": self.config.translation_engine if self.config.translate_enabled else None,
                 "asrModel": self.config.asr_model_key,
                 "translationModel": self.config.translation_model_key if self.config.translate_enabled else "",
                 "device": self.config.device,
@@ -813,12 +948,21 @@ class LiveAudioProcessor:
                 "nCtx": self.config.n_ctx,
                 "nGpuLayers": self.config.n_gpu_layers,
                 "translationGpuIndex": self.config.translation_gpu_index,
-                "translationRuntime": gguf_runtime_status(
-                    self.config.n_gpu_layers,
-                    self.config.translation_gpu_index,
-                )
-                if self.config.translate_enabled
-                else None,
+                "translationRuntime": (
+                    {
+                        "available": True,
+                        "mode": "online",
+                        "provider": (self.config.online_translation_settings or {}).get("onlineProvider") or "deepseek",
+                        "model": self.config.translation_model_key,
+                    }
+                    if self.config.translate_enabled and self.config.translation_engine == "online"
+                    else gguf_runtime_status(
+                        self.config.n_gpu_layers,
+                        self.config.translation_gpu_index,
+                    )
+                    if self.config.translate_enabled
+                    else None
+                ),
                 "codec": self.config.codec,
                 "sampleRate": self.config.sample_rate,
                 "channels": self.config.channels,
@@ -851,9 +995,29 @@ class LiveAudioProcessor:
             }
 
     def _unregister_connection(self) -> None:
+        should_clear_caches = False
         with _LIVE_CONNECTIONS_LOCK:
             _LIVE_CONNECTIONS.pop(self.session_id, None)
             _LIVE_PROCESSORS.pop(self.session_id, None)
+            should_clear_caches = not _LIVE_CONNECTIONS
+        if should_clear_caches:
+            self._clear_runtime_caches()
+
+    def _clear_runtime_caches(self) -> None:
+        cleared_asr = clear_asr_model_cache()
+        cleared_gguf = clear_gguf_model_cache()
+        if cleared_asr or cleared_gguf:
+            gc.collect()
+            log_event(
+                "info",
+                "直播连接已清空，模型缓存已释放",
+                category="live",
+                details={
+                    "sessionId": self.session_id,
+                    "clearedAsrModels": cleared_asr,
+                    "clearedGgufModels": cleared_gguf,
+                },
+            )
 
     def _update_connection_counters(self, **changes: Any) -> None:
         with _LIVE_CONNECTIONS_LOCK:

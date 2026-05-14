@@ -132,6 +132,13 @@ def asr_runtime_status(device: str, device_index: int, compute_type: str) -> dic
     }
 
 
+def clear_asr_model_cache() -> int:
+    with _MODEL_CACHE_LOCK:
+        count = len(_MODEL_CACHE)
+        _MODEL_CACHE.clear()
+        return count
+
+
 def _model(model_path: Path, device: str, compute_type: str, device_index: int) -> tuple[WhisperModel, str]:
     requested_device = (device or "auto").strip().lower()
     resolved_device = _resolve_asr_device(device)

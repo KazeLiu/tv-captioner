@@ -64,12 +64,14 @@ def _translation_runtime_status(cuda_available: bool, live_defaults: dict[str, A
     if uses_gpu:
         detail = (
             f"已安装 CUDA 版 llama-cpp-python {version}；当前直播默认会尝试使用 GPU "
-            f"{translation_gpu_index} offload {n_gpu_layers} 层。若模型加载失败，后端会退回 CPU。"
+            f"{translation_gpu_index} offload {n_gpu_layers} 层。层数表示把 GGUF 翻译模型的一部分层放进显卡，"
+            "数字越大越吃显存；若模型加载失败，后端会退回 CPU。"
         )
     elif supports_gpu and cuda_available:
         detail = (
             f"已安装 CUDA 版 llama-cpp-python {version}，GGUF 可用 GPU offload；"
-            "当前直播默认层数为 0，所以翻译仍走 CPU。要启用 GPU，请到“直播 > 高级设备参数”把 GGUF 翻译 GPU 层数设为 10-20 试起。"
+            "当前直播默认层数为 0，所以翻译仍走 CPU。GGUF 翻译 GPU 层数表示把多少层翻译模型放进显卡；"
+            "4GB 显存建议从 2-4 层小步测试。"
         )
     else:
         detail = (

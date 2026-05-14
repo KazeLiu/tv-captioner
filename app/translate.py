@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import threading
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any, Callable
+
+from .logs import log_event
 
 
 _LLAMA_CACHE: dict[tuple[str, int, int, int], Any] = {}
@@ -62,6 +68,14 @@ def cached_gguf_runtime(
     key = (str(model_path), n_ctx, n_gpu_layers, main_gpu)
     with _LLAMA_CACHE_LOCK:
         return dict(_LLAMA_RUNTIME.get(key) or gguf_runtime_status(n_gpu_layers, main_gpu))
+
+
+def clear_gguf_model_cache() -> int:
+    with _LLAMA_CACHE_LOCK:
+        count = len(_LLAMA_CACHE)
+        _LLAMA_CACHE.clear()
+        _LLAMA_RUNTIME.clear()
+        return count
 
 
 def _llama(model_path: Path, n_ctx: int, n_gpu_layers: int, main_gpu: int) -> Any:
@@ -130,6 +144,182 @@ def _completion_text(result: dict[str, Any]) -> str:
     return str(message.get("content") or choice.get("text") or "").strip()
 
 
+def _log_deepseek_cache_usage(result: dict[str, Any], model: str) -> None:
+    usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+    hit_tokens = usage.get("prompt_cache_hit_tokens")
+    miss_tokens = usage.get("prompt_cache_miss_tokens")
+    if hit_tokens is None and miss_tokens is None:
+        return
+    log_event(
+        "info",
+        "DeepSeek 缓存统计",
+        category="translation",
+        details={
+            "model": model,
+            "promptCacheHitTokens": hit_tokens,
+            "promptCacheMissTokens": miss_tokens,
+        },
+    )
+
+
+def _chat_completion_url(api_url: str) -> str:
+    base = (api_url or "").strip().rstrip("/")
+    if not base:
+        raise TranslationRuntimeError("请填写 DeepSeek API 地址。")
+    if base.endswith("/chat/completions"):
+        return base
+    return f"{base}/chat/completions"
+
+
+def _format_prompt(prompt: str, source_language: str, target_language: str) -> str:
+    try:
+        return prompt.format(source_language=source_language, target_language=target_language)
+    except (KeyError, ValueError):
+        return prompt
+
+
+def deepseek_chat_completion(
+    *,
+    api_url: str,
+    api_key: str,
+    model: str,
+    messages: list[dict[str, str]],
+    temperature: float = 0.1,
+    max_tokens: int = 256,
+    timeout: float = 45.0,
+) -> str:
+    if not api_key.strip():
+        raise TranslationRuntimeError("请填写 DeepSeek API Key。")
+    payload = {
+        "model": model,
+        "messages": messages,
+        "thinking": {"type": "disabled"},
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    request = urllib.request.Request(
+        _chat_completion_url(api_url),
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key.strip()}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise TranslationRuntimeError(f"DeepSeek 请求失败：HTTP {exc.code} {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise TranslationRuntimeError(f"DeepSeek 连接失败：{exc.reason}") from exc
+    except TimeoutError as exc:
+        raise TranslationRuntimeError("DeepSeek 连接超时。") from exc
+    except json.JSONDecodeError as exc:
+        raise TranslationRuntimeError("DeepSeek 返回内容不是有效 JSON。") from exc
+    _log_deepseek_cache_usage(result, model)
+    return _completion_text(result)
+
+
+def _deeplx_request_target(api_url: str, api_key: str) -> tuple[str, dict[str, str]]:
+    token = api_key.strip()
+    if not token:
+        raise TranslationRuntimeError("请填写 DeepLX Key。")
+    if token.startswith(("http://", "https://")):
+        url = token.rstrip("/")
+        return (url if url.endswith("/translate") else f"{url}/translate"), {}
+
+    base = (api_url or "").strip().rstrip("/")
+    if not base:
+        raise TranslationRuntimeError("DeepLX API 地址未配置。")
+    if "{key}" in base:
+        return base.replace("{key}", urllib.parse.quote(token, safe="")), {}
+    if base.endswith("/translate"):
+        return base, {"Authorization": f"Bearer {token}"}
+    return f"{base}/{urllib.parse.quote(token, safe='')}/translate", {}
+
+
+def _deeplx_language_code(language: str | None, *, is_source: bool) -> str:
+    if not language or language.lower() in {"auto", "the detected source language"}:
+        return "auto" if is_source else "zh"
+    labels = {
+        "zh": "zh",
+        "zh-cn": "zh",
+        "chinese": "zh",
+        "中文": "zh",
+        "en": "en",
+        "english": "en",
+        "英语": "en",
+        "ja": "ja",
+        "japanese": "ja",
+        "日语": "ja",
+        "ko": "ko",
+        "korean": "ko",
+        "韩语": "ko",
+        "ru": "ru",
+        "russian": "ru",
+        "俄语": "ru",
+        "fr": "fr",
+        "french": "fr",
+        "法语": "fr",
+        "de": "de",
+        "german": "de",
+        "德语": "de",
+        "ar": "ar",
+        "arabic": "ar",
+        "阿拉伯语": "ar",
+    }
+    return labels.get(language.lower(), language.lower())
+
+
+def deeplx_translate_text(
+    *,
+    api_url: str,
+    api_key: str,
+    text: str,
+    source_language: str | None,
+    target_language: str,
+    timeout: float = 45.0,
+) -> str:
+    url, auth_headers = _deeplx_request_target(api_url, api_key)
+    payload = {
+        "text": text,
+        "source_lang": _deeplx_language_code(source_language, is_source=True),
+        "target_lang": _deeplx_language_code(target_language, is_source=False),
+    }
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 TVCaptioner/1.0",
+            **auth_headers,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise TranslationRuntimeError(f"DeepLX 请求失败：HTTP {exc.code} {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise TranslationRuntimeError(f"DeepLX 连接失败：{exc.reason}") from exc
+    except TimeoutError as exc:
+        raise TranslationRuntimeError("DeepLX 连接超时。") from exc
+    except json.JSONDecodeError as exc:
+        raise TranslationRuntimeError("DeepLX 返回内容不是有效 JSON。") from exc
+
+    translated_text = result.get("data") or result.get("translation") or result.get("translatedText")
+    if isinstance(translated_text, str):
+        return translated_text.strip()
+    if isinstance(translated_text, list):
+        return "\n".join(str(item) for item in translated_text).strip()
+    raise TranslationRuntimeError(f"DeepLX 返回内容缺少翻译结果：{result}")
+
+
 def _trim_context(context: str, limit: int) -> str:
     text = " ".join(context.split())
     if len(text) <= limit:
@@ -153,6 +343,7 @@ def translate_segments(
     main_gpu: int = 0,
     previous_context: str = "",
     context_window_chars: int = 800,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[dict[str, Any]]:
     if not target_language.strip():
         raise TranslationRuntimeError("请填写目标语言。")
@@ -166,6 +357,10 @@ def translate_segments(
     translated_segments: list[dict[str, Any]] = []
     total = max(len(segments), 1)
     for index, segment in enumerate(segments, start=1):
+        if cancelled and cancelled():
+            update(message="Translation cancelled", progress=min(0.98, (index - 1) / total))
+            break
+
         text = str(segment.get("text") or "").strip()
         translated_text = ""
         if text:
@@ -209,5 +404,95 @@ def translate_segments(
             message="Translating subtitles",
             progress=min(0.98, index / total),
         )
+        if cancelled and cancelled():
+            update(message="Translation cancelled", progress=min(0.98, index / total))
+            break
+
+    return translated_segments
+
+
+def translate_segments_online(
+    segments: list[dict[str, Any]],
+    settings: dict[str, Any],
+    source_language: str | None,
+    target_language: str,
+    update: Callable[..., None],
+    previous_context: str = "",
+    context_window_chars: int = 800,
+    cancelled: Callable[[], bool] | None = None,
+) -> list[dict[str, Any]]:
+    if not target_language.strip():
+        raise TranslationRuntimeError("请填写目标语言。")
+
+    provider = str(settings.get("onlineProvider") or "deepseek").lower()
+    deepseek = settings.get("deepseek") or {}
+    deeplx = settings.get("deeplx") or {}
+    source = _language_label(source_language)
+    prompt = _format_prompt(str(deepseek.get("prompt") or ""), source, target_language)
+    model = str(deepseek.get("model") or "deepseek-v4-flash")
+    api_url = str(deepseek.get("apiUrl") or "")
+    api_key = str(deepseek.get("apiKey") or "")
+    if provider == "deeplx":
+        model = "DeepLX"
+        api_url = str(deeplx.get("apiUrl") or "")
+        api_key = str(deeplx.get("apiKey") or "")
+
+    update(message=f"Connecting online translator: {model}", progress=None)
+    rolling_context = _trim_context(previous_context, context_window_chars)
+    translated_segments: list[dict[str, Any]] = []
+    total = max(len(segments), 1)
+    for index, segment in enumerate(segments, start=1):
+        if cancelled and cancelled():
+            update(message="Translation cancelled", progress=min(0.98, (index - 1) / total))
+            break
+
+        text = str(segment.get("text") or "").strip()
+        translated_text = ""
+        if text:
+            context_block = (
+                f"Previous subtitle context for continuity:\n{rolling_context}\n\n"
+                if rolling_context
+                else ""
+            )
+            if provider == "deeplx":
+                translated_text = deeplx_translate_text(
+                    api_url=api_url,
+                    api_key=api_key,
+                    text=text,
+                    source_language=source_language,
+                    target_language=target_language,
+                )
+            else:
+                translated_text = deepseek_chat_completion(
+                    api_url=api_url,
+                    api_key=api_key,
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": prompt},
+                        {
+                            "role": "user",
+                            "content": (
+                                f"{context_block}"
+                                f"Translate this subtitle from {source} to {target_language}:\n"
+                                f"{text}"
+                            ),
+                        },
+                    ],
+                )
+            rolling_context = _append_context(
+                rolling_context,
+                source_text=text,
+                translated_text=translated_text,
+                limit=context_window_chars,
+            )
+
+        translated_segments.append({**segment, "translation": translated_text})
+        update(
+            message="Translating subtitles online",
+            progress=min(0.98, index / total),
+        )
+        if cancelled and cancelled():
+            update(message="Translation cancelled", progress=min(0.98, index / total))
+            break
 
     return translated_segments

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>TV Captioner Backend</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260514-gguf-cuda" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260514-deepseek-online" />
   </head>
   <body>
     <main class="shell">
@@ -141,7 +141,7 @@
       </section>
 
       <section id="tab-translate" class="tab-panel">
-        <section class="band">
+        <section class="band translation-local-panel">
           <div class="section-title">
             <h2>翻译环境</h2>
             <div id="translationReadyBadge" class="ready-badge pending">检查中</div>
@@ -149,7 +149,7 @@
           <div id="translationChecklist" class="checklist"></div>
         </section>
 
-        <section class="band">
+        <section class="band translation-local-panel">
           <h2>Qwen 翻译模型</h2>
           <form id="customTranslationModelForm" class="custom-model-form">
             <label>
@@ -177,7 +177,7 @@
           <div id="translationModelList" class="model-list"></div>
         </section>
 
-        <section class="band">
+        <section class="band translation-local-panel">
           <h2>翻译测试</h2>
           <p id="translationGpuHint" class="section-note">正在检测 GGUF 运行库；翻译环境只显示当前运行方式，GPU 层数请到直播高级参数里设置。</p>
           <form id="translationTestForm" class="job-form">
@@ -282,7 +282,63 @@
           </form>
         </section>
 
-        <section class="band">
+        <section class="band translation-online-panel">
+          <div class="section-title">
+            <h2>DeepSeek 在线翻译</h2>
+            <div id="deepseekConfigBadge" class="ready-badge pending">待配置</div>
+          </div>
+          <form id="deepseekTranslationForm" class="online-provider-form">
+            <article class="provider-card">
+              <div class="grid">
+                <label>
+                  API 地址
+                  <input name="apiUrl" type="url" placeholder="https://api.deepseek.com" />
+                </label>
+                <label>
+                  API Key
+                  <input name="apiKey" type="text" autocomplete="off" placeholder="sk-..." />
+                </label>
+                <label>
+                  模型
+                  <input name="model" type="text" placeholder="deepseek-v4-flash" />
+                </label>
+              </div>
+              <label>
+                默认提示词
+                <textarea name="prompt" rows="7"></textarea>
+              </label>
+              <div class="actions">
+                <button type="submit">保存 DeepSeek 配置</button>
+                <button type="button" id="testDeepseekBtn">测试翻译连通性</button>
+              </div>
+              <div id="deepseekTestResult" class="form-result"></div>
+            </article>
+          </form>
+        </section>
+
+        <section class="band translation-online-panel">
+          <div class="section-title">
+            <h2>DeepLX 在线翻译</h2>
+            <div id="deeplxConfigBadge" class="ready-badge pending">待配置</div>
+          </div>
+          <form id="deeplxTranslationForm" class="online-provider-form">
+            <article class="provider-card">
+              <div class="grid">
+                <label>
+                  DeepLX Key
+                  <input name="apiKey" type="text" autocomplete="off" placeholder="DeepLX Key 或完整 /translate 地址" />
+                </label>
+              </div>
+              <div class="actions">
+                <button type="submit">保存 DeepLX 配置</button>
+                <button type="button" id="testDeeplxBtn">测试翻译连通性</button>
+              </div>
+              <div id="deeplxTestResult" class="form-result"></div>
+            </article>
+          </form>
+        </section>
+
+        <section class="band translation-local-panel">
           <h2>翻译测试队列</h2>
           <div id="translationTaskList" class="task-list"></div>
         </section>
@@ -378,6 +434,26 @@
           <p class="section-note">安装或更新 CUDA 后需要重启后端；重启后到直播标签把 ASR 设备选为 auto 或 cuda，并让电视端重新连接。</p>
           <div id="restartBackendResult" class="form-result"></div>
         </section>
+        <section class="band">
+          <div class="section-title">
+            <h2>翻译模式</h2>
+            <div id="translationModeBadge" class="ready-badge pending">读取中</div>
+          </div>
+          <form id="translationModeForm" class="job-form">
+            <div class="grid">
+              <label>
+                当前翻译模式
+                <select name="mode">
+                  <option value="local">本地翻译</option>
+                  <option value="online">在线翻译</option>
+                </select>
+              </label>
+            </div>
+            <div class="actions">
+              <button type="submit">保存翻译模式</button>
+            </div>
+          </form>
+        </section>
       </section>
 
       <section id="tab-logs" class="tab-panel">
@@ -431,6 +507,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=20260514-gguf-cuda"></script>
+    <script src="/static/app.js?v=20260514-deepseek-online"></script>
   </body>
 </html>

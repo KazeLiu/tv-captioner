@@ -14,7 +14,7 @@ import time
 import uuid
 import wave
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
@@ -55,7 +55,19 @@ from .live_audio import create_live_session, get_live_session, list_live_session
 from .live_stream import LiveAudioProcessor, LiveStreamConfig, disconnect_live_connection, list_live_connections
 from .logs import list_events, log_event, subscribe_events, unsubscribe_events
 from .tasks import TaskStore
-from .translate import translate_segments
+from .translate import (
+    TranslationRuntimeError,
+    deepseek_chat_completion,
+    deeplx_translate_text,
+    translate_segments,
+    translate_segments_online,
+)
+from .translation_settings import (
+    DEEPSEEK_MODEL,
+    load_translation_settings,
+    public_translation_settings,
+    save_translation_settings,
+)
 from .version import APP_NAME, APP_VERSION, version_info
 
 
@@ -63,6 +75,7 @@ ensure_dirs()
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
 tasks = TaskStore(max_workers=1)
+ONLINE_TRANSLATION_MODEL_KEYS = {"deepseek", "deeplx"}
 
 
 def _restart_backend_process() -> None:
@@ -149,6 +162,13 @@ class LiveDefaultsUpdate(BaseModel):
     translationGpuIndex: int = 0
 
 
+class TranslationSettingsUpdate(BaseModel):
+    mode: str = "local"
+    onlineProvider: str = "deepseek"
+    deepseek: dict[str, Any] = {}
+    deeplx: dict[str, Any] = {}
+
+
 def _validate_asr_model(asr_model: str) -> Path:
     model_path = custom_model_path(asr_model) if asr_model.startswith("custom:") else None
     if asr_model not in ASR_MODELS and model_path is None:
@@ -186,6 +206,88 @@ def _validate_translation_model(translation_model: str) -> Path:
     if not validation["ok"]:
         raise HTTPException(status_code=400, detail=f"Translation model is not ready: {translation_model}")
     return Path(validation["path"])
+
+
+def _online_translation_ready(settings: dict[str, Any]) -> bool:
+    provider = settings.get("onlineProvider") or "deepseek"
+    if provider == "deeplx":
+        deeplx = settings.get("deeplx") or {}
+        return bool(str(deeplx.get("apiKey") or "").strip())
+    deepseek = settings.get("deepseek") or {}
+    return bool(
+        str(deepseek.get("apiUrl") or "").strip()
+        and str(deepseek.get("apiKey") or "").strip()
+        and str(deepseek.get("prompt") or "").strip()
+    )
+
+
+def _online_translation_model_label(settings: dict[str, Any]) -> str:
+    if settings.get("onlineProvider") == "deeplx":
+        return "DeepLX"
+    return str((settings.get("deepseek") or {}).get("model") or DEEPSEEK_MODEL)
+
+
+def _translation_engine_label(settings: dict[str, Any]) -> str:
+    if settings["mode"] != "online":
+        return "llama-cpp-python"
+    return "deeplx" if settings.get("onlineProvider") == "deeplx" else "deepseek"
+
+
+def _require_online_translation_settings(provider: str | None = None) -> dict[str, Any]:
+    settings = load_translation_settings()
+    if provider in ONLINE_TRANSLATION_MODEL_KEYS:
+        settings = {**settings, "mode": "online", "onlineProvider": provider}
+    if settings["mode"] != "online":
+        return settings
+    if not _online_translation_ready(settings):
+        provider_label = "DeepLX Key" if settings.get("onlineProvider") == "deeplx" else "DeepSeek API 地址、Key 和提示词"
+        raise HTTPException(status_code=400, detail=f"请先在翻译页填写 {provider_label}。")
+    return settings
+
+
+def _translation_settings_for_model(translation_model: str) -> dict[str, Any]:
+    provider = translation_model if translation_model in ONLINE_TRANSLATION_MODEL_KEYS else None
+    return _require_online_translation_settings(provider)
+
+
+def _validate_translation_model_for_settings(translation_model: str, settings: dict[str, Any]) -> Path | None:
+    if settings["mode"] == "online":
+        return None
+    return _validate_translation_model(translation_model)
+
+
+def _translate_segments_for_current_mode(
+    *,
+    segments: list[dict[str, Any]],
+    settings: dict[str, Any],
+    translation_model_path_value: Path | None,
+    source_language: str | None,
+    target_language: str,
+    update,
+    n_ctx: int = 4096,
+    n_gpu_layers: int = 0,
+    main_gpu: int = 0,
+) -> list[dict[str, Any]]:
+    if settings["mode"] == "online":
+        return translate_segments_online(
+            segments=segments,
+            settings=settings,
+            source_language=source_language,
+            target_language=target_language,
+            update=update,
+        )
+    if translation_model_path_value is None:
+        raise TranslationRuntimeError("缺少本地翻译模型。")
+    return translate_segments(
+        segments=segments,
+        model_path=translation_model_path_value,
+        source_language=source_language,
+        target_language=target_language,
+        update=update,
+        n_ctx=n_ctx,
+        n_gpu_layers=n_gpu_layers,
+        main_gpu=main_gpu,
+    )
 
 
 def _store_media(
@@ -301,7 +403,55 @@ def _asr_model_entries() -> list[dict]:
 
 
 def _translation_model_entries() -> list[dict]:
+    settings = load_translation_settings()
+    deepseek = settings["deepseek"]
+    deeplx = settings["deeplx"]
+    deepseek_ready = _online_translation_ready({**settings, "mode": "online", "onlineProvider": "deepseek"})
+    deeplx_ready = _online_translation_ready({**settings, "mode": "online", "onlineProvider": "deeplx"})
+    online_models = [
+        {
+            "key": "deepseek",
+            "label": f"DeepSeek {deepseek.get('model') or DEEPSEEK_MODEL}",
+            "nameCn": f"DeepSeek 在线翻译（{deepseek.get('model') or DEEPSEEK_MODEL}）",
+            "repoId": "online/deepseek",
+            "url": "https://api-docs.deepseek.com/api/create-chat-completion",
+            "description": "在线翻译模型。APK 选择该模型 key 后，后端会调用当前 DeepSeek 配置并返回翻译结果。",
+            "ready": deepseek_ready,
+            "path": deepseek.get("apiUrl") or "",
+            "sizeBytes": 0,
+            "files": [],
+            "custom": False,
+            "online": True,
+            "provider": "deepseek",
+            "validation": {
+                "ok": deepseek_ready,
+                "errors": [] if deepseek_ready else ["请先在翻译页填写 DeepSeek API 地址、Key 和提示词。"],
+                "warnings": [],
+            },
+        },
+        {
+            "key": "deeplx",
+            "label": "DeepLX",
+            "nameCn": "DeepLX 在线翻译",
+            "repoId": "online/deeplx",
+            "url": "https://github.com/OwO-Network/DeepLX",
+            "description": "在线翻译模型。APK 选择该模型 key 后，后端会调用当前 DeepLX Key 并返回翻译结果。",
+            "ready": deeplx_ready,
+            "path": deeplx.get("apiUrl") or "",
+            "sizeBytes": 0,
+            "files": [],
+            "custom": False,
+            "online": True,
+            "provider": "deeplx",
+            "validation": {
+                "ok": deeplx_ready,
+                "errors": [] if deeplx_ready else ["请先在翻译页填写 DeepLX Key。"],
+                "warnings": [],
+            },
+        },
+    ]
     return [
+        *online_models,
         *[translation_model_entry(key) for key in TRANSLATION_MODELS],
         *[
             {
@@ -412,9 +562,48 @@ def root() -> RedirectResponse:
 def status(
     asr_model: str = "large-v2",
 ) -> dict:
-    return environment_status(
+    data = environment_status(
         preferred_asr_model=asr_model,
     )
+    settings = load_translation_settings()
+    data["translationSettings"] = public_translation_settings(settings)
+    if settings["mode"] == "online":
+        deepseek = settings["deepseek"]
+        deeplx = settings["deeplx"]
+        provider = settings.get("onlineProvider") or "deepseek"
+        provider_label = "DeepLX" if provider == "deeplx" else "DeepSeek"
+        provider_model = "DeepLX" if provider == "deeplx" else deepseek.get("model") or DEEPSEEK_MODEL
+        ready = _online_translation_ready(settings)
+        data["translationReady"] = ready
+        data["translationChecks"] = [
+            {
+                "key": "translation_mode",
+                "label": "翻译模式",
+                "ok": True,
+                "detail": f"当前使用 {provider_label} 在线翻译，不需要本地 GGUF 翻译模型。",
+            },
+            {
+                "key": f"{provider}_config",
+                "label": f"{provider_label} 配置",
+                "ok": ready,
+                "detail": (
+                    (
+                        f"API 地址 {deeplx.get('apiUrl') or '-'}，Key 已填写。"
+                        if provider == "deeplx"
+                        else f"模型 {deepseek.get('model') or DEEPSEEK_MODEL}，API 地址 {deepseek.get('apiUrl') or '-'}，Key 已填写。"
+                    )
+                    if ready
+                    else f"请在翻译页填写 {provider_label} 配置。"
+                ),
+            },
+        ]
+        data["translationRuntime"] = {
+            "available": ready,
+            "mode": "online",
+            "provider": provider,
+            "model": provider_model,
+        }
+    return data
 
 
 @app.get("/api/version")
@@ -427,6 +616,132 @@ def restart_backend(background_tasks: BackgroundTasks) -> dict:
     log_event("info", "后端重启已请求", category="system", details={"source": "settings"})
     background_tasks.add_task(_restart_backend_process)
     return {"restarting": True}
+
+
+@app.get("/api/translation/settings")
+def get_translation_settings() -> dict:
+    return public_translation_settings(load_translation_settings())
+
+
+@app.put("/api/translation/settings")
+def update_translation_settings(payload: TranslationSettingsUpdate) -> dict:
+    settings = save_translation_settings(payload.model_dump())
+    log_event(
+        "info",
+        "翻译设置已保存",
+        category="settings",
+        details={
+            "mode": settings["mode"],
+            "onlineProvider": settings["onlineProvider"],
+            "deepseekModel": settings["deepseek"]["model"],
+            "deepseekApiUrl": settings["deepseek"]["apiUrl"],
+            "deepseekApiKeySet": bool(settings["deepseek"]["apiKey"]),
+            "deeplxApiUrl": settings["deeplx"]["apiUrl"],
+            "deeplxApiKeySet": bool(settings["deeplx"]["apiKey"]),
+        },
+    )
+    return public_translation_settings(settings)
+
+
+@app.post("/api/translation/deepseek/test")
+def test_deepseek_translation(payload: TranslationSettingsUpdate) -> dict:
+    settings = save_translation_settings(payload.model_dump())
+    deepseek = settings["deepseek"]
+    try:
+        system_prompt = deepseek["prompt"].format(
+            source_language="English",
+            target_language="Chinese",
+        )
+    except (KeyError, ValueError):
+        system_prompt = deepseek["prompt"]
+    try:
+        translated_text = deepseek_chat_completion(
+            api_url=deepseek["apiUrl"],
+            api_key=deepseek["apiKey"],
+            model=deepseek["model"],
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                },
+                {"role": "user", "content": "Translate this subtitle from English to Chinese:\nHello, this is a connection test."},
+            ],
+            max_tokens=128,
+            timeout=30,
+        )
+    except Exception as exc:
+        log_event(
+            "warning",
+            "DeepSeek 翻译连通性测试失败",
+            category="translation",
+            details={
+                "mode": settings["mode"],
+                "deepseekModel": deepseek["model"],
+                "deepseekApiUrl": deepseek["apiUrl"],
+                "error": str(exc),
+            },
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(
+        "info",
+        "DeepSeek 翻译连通性测试成功",
+        category="translation",
+        details={
+            "deepseekModel": deepseek["model"],
+            "deepseekApiUrl": deepseek["apiUrl"],
+            "translatedText": translated_text,
+        },
+    )
+    return {
+        "ok": True,
+        "model": deepseek["model"],
+        "apiUrl": deepseek["apiUrl"],
+        "translatedText": translated_text,
+        "settings": public_translation_settings(settings),
+    }
+
+
+@app.post("/api/translation/deeplx/test")
+def test_deeplx_translation(payload: TranslationSettingsUpdate) -> dict:
+    settings = save_translation_settings(payload.model_dump())
+    deeplx = settings["deeplx"]
+    try:
+        translated_text = deeplx_translate_text(
+            api_url=deeplx["apiUrl"],
+            api_key=deeplx["apiKey"],
+            text="Hello, this is a connection test.",
+            source_language="English",
+            target_language="Chinese",
+            timeout=30,
+        )
+    except Exception as exc:
+        log_event(
+            "warning",
+            "DeepLX 翻译连通性测试失败",
+            category="translation",
+            details={
+                "mode": settings["mode"],
+                "deeplxApiUrl": deeplx["apiUrl"],
+                "error": str(exc),
+            },
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(
+        "info",
+        "DeepLX 翻译连通性测试成功",
+        category="translation",
+        details={
+            "deeplxApiUrl": deeplx["apiUrl"],
+            "translatedText": translated_text,
+        },
+    )
+    return {
+        "ok": True,
+        "provider": "deeplx",
+        "apiUrl": deeplx["apiUrl"],
+        "translatedText": translated_text,
+        "settings": public_translation_settings(settings),
+    }
 
 
 @app.get("/api/tasks")
@@ -714,7 +1029,8 @@ async def live_websocket(
         translation_gpu_index = _validate_nonnegative_index(translation_gpu_index, "translationGpuIndex")
 
         asr_model_path_value = _validate_asr_model(asr_model)
-        translation_model_path_value = _validate_translation_model(translation_model)
+        translation_settings = _translation_settings_for_model(translation_model)
+        translation_model_path_value = _validate_translation_model_for_settings(translation_model, translation_settings)
     except HTTPException as exc:
         await websocket.accept()
         await websocket.send_json({"type": "error", "message": exc.detail})
@@ -730,7 +1046,13 @@ async def live_websocket(
             asr_model_path=asr_model_path_value,
             asr_model_key=asr_model,
             translation_model_path=translation_model_path_value,
-            translation_model_key=translation_model,
+            translation_model_key=(
+                _online_translation_model_label(translation_settings)
+                if translation_settings["mode"] == "online"
+                else translation_model
+            ),
+            translation_engine=translation_settings["mode"],
+            online_translation_settings=translation_settings if translation_settings["mode"] == "online" else None,
             chinese_script=_normalize_chinese_script_or_400(chinese_script),
             device=device,
             device_index=device_index,
@@ -844,7 +1166,8 @@ def translate_audio_now(
 ) -> dict:
     request_id = uuid.uuid4().hex
     asr_model_path_value = _validate_asr_model(asr_model)
-    translation_model_path_value = _validate_translation_model(translation_model)
+    translation_settings = _translation_settings_for_model(translation_model)
+    translation_model_path_value = _validate_translation_model_for_settings(translation_model, translation_settings)
     device_index = _validate_nonnegative_index(device_index, "device_index")
     translation_gpu_index = _validate_nonnegative_index(translation_gpu_index, "translation_gpu_index")
     media_path, label = _store_media(request_id, file, source_path)
@@ -865,7 +1188,12 @@ def translate_audio_now(
             "sourceLanguage": requested_language or "auto",
             "targetLanguage": target,
             "asrModel": asr_model,
-            "translationModel": translation_model,
+            "translationModel": (
+                _online_translation_model_label(translation_settings)
+                if translation_settings["mode"] == "online"
+                else translation_model
+            ),
+            "translationEngine": translation_settings["mode"],
             "device": device,
             "deviceIndex": device_index,
             "computeType": compute_type,
@@ -908,9 +1236,10 @@ def translate_audio_now(
             },
         )
 
-        segments = translate_segments(
+        segments = _translate_segments_for_current_mode(
             segments=asr_result["segments"],
-            model_path=translation_model_path_value,
+            settings=translation_settings,
+            translation_model_path_value=translation_model_path_value,
             source_language=requested_language or detected_language,
             target_language=target,
             update=_scaled_update(update, 0.55, 0.43),
@@ -956,6 +1285,7 @@ def translate_audio_now(
         "computeType": compute_type,
         "nGpuLayers": n_gpu_layers,
         "translationGpuIndex": translation_gpu_index,
+        "translationEngine": translation_settings["mode"],
         "duration": asr_result["duration"],
         "segmentCount": len(segments),
         "sourceText": source_text,
@@ -1082,7 +1412,8 @@ def create_translation_test_job(
 ) -> dict:
     job_id = uuid.uuid4().hex
     asr_model_path_value = _validate_asr_model(asr_model)
-    translation_model_path_value = _validate_translation_model(translation_model)
+    translation_settings = _translation_settings_for_model(translation_model)
+    translation_model_path_value = _validate_translation_model_for_settings(translation_model, translation_settings)
     device_index = _validate_nonnegative_index(device_index, "device_index")
     translation_gpu_index = _validate_nonnegative_index(translation_gpu_index, "translation_gpu_index")
     output_chinese_script = _normalize_chinese_script_or_400(chinese_script)
@@ -1097,7 +1428,12 @@ def create_translation_test_job(
             "sourceLanguage": source_language or "auto",
             "targetLanguage": target_language,
             "asrModel": asr_model,
-            "translationModel": translation_model,
+            "translationModel": (
+                _online_translation_model_label(translation_settings)
+                if translation_settings["mode"] == "online"
+                else translation_model
+            ),
+            "translationEngine": translation_settings["mode"],
             "device": device,
             "deviceIndex": device_index,
             "computeType": compute_type,
@@ -1139,9 +1475,10 @@ def create_translation_test_job(
                 },
             )
 
-            segments = translate_segments(
+            segments = _translate_segments_for_current_mode(
                 segments=asr_result["segments"],
-                model_path=translation_model_path_value,
+                settings=translation_settings,
+                translation_model_path_value=translation_model_path_value,
                 source_language=requested_language or detected_language,
                 target_language=target_language.strip(),
                 update=_scaled_update(update, 0.55, 0.43),
@@ -1167,7 +1504,11 @@ def create_translation_test_job(
             payload = {
                 "mediaPath": str(media_path),
                 "asrModel": asr_model,
-                "translationModel": translation_model,
+                "translationModel": (
+                    _online_translation_model_label(translation_settings)
+                    if translation_settings["mode"] == "online"
+                    else translation_model
+                ),
                 "device": device,
                 "deviceIndex": device_index,
                 "computeType": compute_type,
@@ -1177,7 +1518,7 @@ def create_translation_test_job(
                 "requestedSourceLanguage": requested_language or "auto",
                 "languageProbability": asr_result["languageProbability"],
                 "duration": asr_result["duration"],
-                "translationEngine": "llama-cpp-python",
+                "translationEngine": _translation_engine_label(translation_settings),
                 "targetLanguage": target_language.strip(),
                 "chineseScript": output_chinese_script,
                 "segments": segments,

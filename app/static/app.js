@@ -27,6 +27,16 @@ const customTranslationModelResult = document.querySelector("#customTranslationM
 const validateTranslationModelBtn = document.querySelector("#validateTranslationModelBtn");
 const translationTestForm = document.querySelector("#translationTestForm");
 const translationGpuHint = document.querySelector("#translationGpuHint");
+const translationModeForm = document.querySelector("#translationModeForm");
+const translationModeBadge = document.querySelector("#translationModeBadge");
+const deepseekTranslationForm = document.querySelector("#deepseekTranslationForm");
+const deepseekConfigBadge = document.querySelector("#deepseekConfigBadge");
+const deepseekTestResult = document.querySelector("#deepseekTestResult");
+const testDeepseekBtn = document.querySelector("#testDeepseekBtn");
+const deeplxTranslationForm = document.querySelector("#deeplxTranslationForm");
+const deeplxConfigBadge = document.querySelector("#deeplxConfigBadge");
+const deeplxTestResult = document.querySelector("#deeplxTestResult");
+const testDeeplxBtn = document.querySelector("#testDeeplxBtn");
 const liveDefaultsForm = document.querySelector("#liveDefaultsForm");
 const liveDefaultsResult = document.querySelector("#liveDefaultsResult");
 const liveTranslationGpuHint = document.querySelector("#liveTranslationGpuHint");
@@ -42,6 +52,9 @@ const restartBackendResult = document.querySelector("#restartBackendResult");
 let autoSelectedModel = false;
 let autoSelectedTranslationModel = false;
 let liveDefaultsLoaded = false;
+let latestTranslationRuntime = null;
+let currentTranslationSettings = null;
+let translationSettingsTouched = false;
 let latestLogs = [];
 let latestLiveConnections = [];
 let refreshTimer = null;
@@ -84,6 +97,7 @@ const messageLabels = {
   "Loading ASR model": "正在加载转写模型",
   "Transcribing media": "正在转写媒体",
   "Translating subtitles": "正在翻译字幕",
+  "Translating subtitles online": "正在调用在线翻译",
 };
 
 const outputLabels = {
@@ -111,6 +125,9 @@ const translateMessage = (message) => {
   if (!message) return "";
   if (message.startsWith("Loading translation model:")) {
     return `正在加载翻译模型：${message.replace("Loading translation model:", "").trim()}`;
+  }
+  if (message.startsWith("Connecting online translator:")) {
+    return `正在连接在线翻译：${message.replace("Connecting online translator:", "").trim()}`;
   }
   return messageLabels[message] || message;
 };
@@ -167,6 +184,7 @@ async function refreshStatus() {
   renderChecks(translationChecklist, data.translationChecks || []);
   renderCudaRecommendation(data.cuda);
   renderTranslationGpuHint(data.translationRuntime);
+  renderTranslationSettings(data.translationSettings);
 
   modelList.innerHTML = "";
   syncAsrModelOptions([...data.asrModels, ...(data.customAsrModels || [])]);
@@ -207,6 +225,10 @@ async function refreshStatus() {
     const files = (validation?.files || model.files || []).length
       ? (validation?.files || model.files).join(", ")
       : "未发现 .gguf 文件";
+    const statusText = model.online ? (model.ready ? "可用" : "待配置") : model.ready ? "可用" : "未放置模型";
+    const locationLabel = model.online ? "接口地址" : "推荐本地目录";
+    const filesLine = model.online ? "" : `<div class="meta">模型文件：${files}</div>`;
+    const sizeLine = model.online ? "" : `<div class="meta">当前大小：${fmtBytes(model.sizeBytes)}</div>`;
     const issues = validation
       ? [...(validation.errors || []), ...(validation.warnings || [])]
           .map((item) => `<div class="meta ${validation.errors?.length ? "bad" : ""}">${item}</div>`)
@@ -216,14 +238,14 @@ async function refreshStatus() {
       "beforeend",
       `<div class="model">
         <div class="model-main">
-          <strong>${model.nameCn || model.label} <span class="${model.ready ? "ok" : "bad"}">${model.ready ? "可用" : "未放置模型"}</span></strong>
+          <strong>${model.nameCn || model.label} <span class="${model.ready ? "ok" : "bad"}">${statusText}</span></strong>
           <details>
             <summary>查看详情</summary>
             <div class="meta">${model.description}</div>
             <div class="meta">模型仓库：${model.repoId}</div>
-            <div class="meta">推荐本地目录：${escapeHtml(model.path)}</div>
-            <div class="meta">模型文件：${files}</div>
-            <div class="meta">当前大小：${fmtBytes(model.sizeBytes)}</div>
+            <div class="meta">${locationLabel}：${escapeHtml(model.path)}</div>
+            ${filesLine}
+            ${sizeLine}
             ${issues}
           </details>
         </div>
@@ -242,24 +264,190 @@ function deleteCustomModelButton(model, type) {
 }
 
 function renderTranslationGpuHint(runtime) {
+  latestTranslationRuntime = runtime || null;
+  if (runtime?.mode === "online") {
+    const model = runtime.model || "deepseek-v4-flash";
+    const provider = runtime.provider === "deeplx" ? "DeepLX" : "DeepSeek";
+    const lines = [`当前使用 ${provider} 在线翻译：${model}。本地 GGUF 翻译模型和 GPU 层数不会参与在线翻译。`];
+    if (translationGpuHint) translationGpuHint.innerHTML = renderNoteLines(lines);
+    if (liveTranslationGpuHint) liveTranslationGpuHint.innerHTML = renderNoteLines(lines);
+    return;
+  }
   const supportsGpu = Boolean(runtime?.supportsGpuOffload);
   const runtimeVersion = runtime?.version ? ` ${runtime.version}` : "";
   const layers = Number(runtime?.nGpuLayers || 0);
   const gpuIndex = Number(runtime?.translationGpuIndex || 0);
   const usingGpu = runtime?.mode === "gpu";
-  const text = usingGpu
-    ? `当前 GGUF 运行库 llama-cpp-python${runtimeVersion} 会按直播默认设置尝试使用 GPU ${gpuIndex}，offload ${layers} 层；加载失败会退回 CPU。`
+  const explainLines = [
+    "GGUF 翻译 GPU 层数不是显卡数量，而是把翻译模型的多少层放到显卡里跑。",
+    "0 层表示翻译全走 CPU；数字越大通常越快，但越吃显存，显存不够会变慢、退回 CPU 或加载失败。",
+    "4GB 显存建议从 2-4 层小步测试；ASR large 模型也在用 CUDA 时，不建议一开始设 10-20 层。",
+  ];
+  const translationLines = usingGpu
+    ? [
+        `当前 GGUF 运行库 llama-cpp-python${runtimeVersion} 会按直播默认设置尝试使用 GPU ${gpuIndex}，offload ${layers} 层。`,
+        ...explainLines,
+      ]
     : supportsGpu
-      ? `当前 GGUF 运行库 llama-cpp-python${runtimeVersion} 是 CUDA 版，但直播默认 GPU 层数为 0，所以现在按 CPU 跑；要启用 GPU，请到直播高级参数设置 10-20 层试起。`
-      : `当前 GGUF 运行库${runtime?.available ? ` llama-cpp-python${runtimeVersion}` : ""}是 CPU 版或不可用；GGUF 翻译 GPU 层数请保持 0。`;
-  if (translationGpuHint) translationGpuHint.textContent = text;
+      ? [
+          `当前 GGUF 运行库 llama-cpp-python${runtimeVersion} 是 CUDA 版，但直播默认 GPU 层数为 0，所以现在按 CPU 跑。`,
+          "要启用 GPU，请到“直播 > 高级设备参数”设置 GGUF 翻译 GPU 层数。",
+          ...explainLines,
+        ]
+      : [
+          `当前 GGUF 运行库${runtime?.available ? ` llama-cpp-python${runtimeVersion}` : ""}是 CPU 版或不可用；GGUF 翻译 GPU 层数请保持 0。`,
+          ...explainLines.slice(0, 2),
+        ];
+  if (translationGpuHint) translationGpuHint.innerHTML = renderNoteLines(translationLines);
   if (liveTranslationGpuHint) {
-    liveTranslationGpuHint.textContent = usingGpu
-      ? `直播默认翻译会尝试使用 GGUF GPU offload：GPU ${gpuIndex}，${layers} 层；如果显存不够会退回 CPU，卡顿时先降层数。`
+    const liveLines = usingGpu
+      ? [
+          `直播默认翻译会尝试使用 GGUF GPU offload：GPU ${gpuIndex}，${layers} 层。`,
+          "如果排队变长、延迟上升或加载失败，先把层数降到 0、2 或 4。",
+        ]
       : supportsGpu
-        ? `直播默认翻译当前按 CPU 跑；GGUF 运行库是 CUDA 版，可在高级设备参数里把 GPU 层数设为 10-20 试起。`
-        : `直播默认翻译当前按 CPU 跑；GGUF 运行库是 CPU 版或不可用，GPU 层数请保持 0。`;
+        ? [
+            "直播默认翻译当前按 CPU 跑；GGUF 运行库是 CUDA 版，可在高级设备参数里启用 GPU 层数。",
+            "层数表示放进显卡的翻译模型层数；4GB 显存建议从 2-4 层小步测试。",
+          ]
+        : [
+            "直播默认翻译当前按 CPU 跑；GGUF 运行库是 CPU 版或不可用，GPU 层数请保持 0。",
+            "层数表示放进显卡的翻译模型层数，不是显卡数量。",
+          ];
+    liveTranslationGpuHint.innerHTML = renderNoteLines(liveLines);
   }
+}
+
+function renderTranslationSettings(settings) {
+  if (!settings) return;
+  currentTranslationSettings = settings;
+  const mode = settings.mode === "online" ? "online" : "local";
+  if (translationModeForm) {
+    translationModeForm.elements.mode.value = mode;
+  }
+  if (translationModeBadge) {
+    translationModeBadge.textContent = mode === "online" ? "在线翻译" : "本地翻译";
+    translationModeBadge.className = `ready-badge ${mode === "online" ? "ready" : "pending"}`;
+  }
+  document.querySelectorAll(".translation-local-panel").forEach((item) => {
+    item.hidden = mode === "online";
+  });
+  document.querySelectorAll(".translation-online-panel").forEach((item) => {
+    item.hidden = mode !== "online";
+  });
+
+  const deepseek = settings.deepseek || {};
+  const deeplx = settings.deeplx || {};
+  const provider = settings.onlineProvider || "deepseek";
+  const deepseekReady = Boolean(deepseek.apiUrl && deepseek.apiKeySet && deepseek.prompt);
+  const deeplxReady = Boolean(deeplx.apiKeySet);
+  if (deepseekConfigBadge) {
+    deepseekConfigBadge.textContent = provider === "deepseek" ? (deepseekReady ? "当前使用" : "待配置") : deepseekReady ? "已保存" : "待配置";
+    deepseekConfigBadge.className = `ready-badge ${provider === "deepseek" && deepseekReady ? "ready" : deepseekReady ? "pending" : "blocked"}`;
+  }
+  if (deeplxConfigBadge) {
+    deeplxConfigBadge.textContent = provider === "deeplx" ? (deeplxReady ? "当前使用" : "待配置") : deeplxReady ? "已保存" : "待配置";
+    deeplxConfigBadge.className = `ready-badge ${provider === "deeplx" && deeplxReady ? "ready" : deeplxReady ? "pending" : "blocked"}`;
+  }
+  if (deepseekTranslationForm && !translationSettingsTouched) {
+    deepseekTranslationForm.elements.apiUrl.value = deepseek.apiUrl || "https://api.deepseek.com";
+    deepseekTranslationForm.elements.apiKey.value = deepseek.apiKey || "";
+    deepseekTranslationForm.elements.model.value = deepseek.model || "deepseek-v4-flash";
+    deepseekTranslationForm.elements.prompt.value = deepseek.prompt || "";
+  }
+  if (deeplxTranslationForm && !translationSettingsTouched) {
+    deeplxTranslationForm.elements.apiKey.value = deeplx.apiKey || "";
+  }
+}
+
+function translationSettingsPayload(mode = null, provider = null) {
+  const existing = currentTranslationSettings || {};
+  const deepseek = existing.deepseek || {};
+  const deeplx = existing.deeplx || {};
+  return {
+    mode: mode || translationModeForm?.elements.mode.value || existing.mode || "local",
+    onlineProvider: provider || existing.onlineProvider || "deepseek",
+    deepseek: {
+      apiUrl: deepseekTranslationForm?.elements.apiUrl.value.trim() || deepseek.apiUrl || "https://api.deepseek.com",
+      apiKey: deepseekTranslationForm?.elements.apiKey.value.trim() || deepseek.apiKey || "",
+      model: deepseekTranslationForm?.elements.model.value.trim() || deepseek.model || "deepseek-v4-flash",
+      prompt: deepseekTranslationForm?.elements.prompt.value.trim() || deepseek.prompt || "",
+    },
+    deeplx: {
+      apiUrl: deeplx.apiUrl || "https://api.deeplx.org",
+      apiKey: deeplxTranslationForm?.elements.apiKey.value.trim() || deeplx.apiKey || "",
+    },
+  };
+}
+
+async function saveTranslationSettings(mode = null, provider = null) {
+  const response = await fetch("/api/translation/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(translationSettingsPayload(mode, provider)),
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    throw new Error(result.detail || "翻译设置保存失败");
+  }
+  translationSettingsTouched = false;
+  renderTranslationSettings(result);
+  await refreshStatus();
+  return result;
+}
+
+async function testDeepseekTranslation() {
+  if (!testDeepseekBtn || !deepseekTestResult) return;
+  testDeepseekBtn.disabled = true;
+  deepseekTestResult.innerHTML = "正在测试 DeepSeek 连通性...";
+  try {
+    const response = await fetch("/api/translation/deepseek/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(translationSettingsPayload("online", "deepseek")),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      throw new Error(result.detail || "DeepSeek 连通性测试失败");
+    }
+    translationSettingsTouched = false;
+    renderTranslationSettings(result.settings);
+    deepseekTestResult.innerHTML = `<span class="ok">连通性测试通过。</span><br><span>示例翻译：${escapeHtml(result.translatedText || "")}</span>`;
+    await refreshStatus();
+  } catch (error) {
+    deepseekTestResult.innerHTML = `<span class="bad">${escapeHtml(error instanceof Error ? error.message : "DeepSeek 连通性测试失败")}</span>`;
+  } finally {
+    testDeepseekBtn.disabled = false;
+  }
+}
+
+async function testDeeplxTranslation() {
+  if (!testDeeplxBtn || !deeplxTestResult) return;
+  testDeeplxBtn.disabled = true;
+  deeplxTestResult.innerHTML = "正在测试 DeepLX 连通性...";
+  try {
+    const response = await fetch("/api/translation/deeplx/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(translationSettingsPayload("online", "deeplx")),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      throw new Error(result.detail || "DeepLX 连通性测试失败");
+    }
+    translationSettingsTouched = false;
+    renderTranslationSettings(result.settings);
+    deeplxTestResult.innerHTML = `<span class="ok">连通性测试通过。</span><br><span>示例翻译：${escapeHtml(result.translatedText || "")}</span>`;
+    await refreshStatus();
+  } catch (error) {
+    deeplxTestResult.innerHTML = `<span class="bad">${escapeHtml(error instanceof Error ? error.message : "DeepLX 连通性测试失败")}</span>`;
+  } finally {
+    testDeeplxBtn.disabled = false;
+  }
+}
+
+function renderNoteLines(lines) {
+  return lines.map((line) => `<span>${escapeHtml(line)}</span>`).join("");
 }
 
 async function refreshLiveDefaults(force = false) {
@@ -301,6 +489,7 @@ async function saveLiveDefaults(event) {
   }
   liveDefaultsLoaded = false;
   await refreshLiveDefaults(true);
+  await refreshStatus();
   liveDefaultsResult.textContent = "已保存";
 }
 
@@ -1166,6 +1355,54 @@ function renderValidation(result, target = customModelResult) {
 
 validateModelBtn.addEventListener("click", validateCustomModelPath);
 validateTranslationModelBtn.addEventListener("click", validateCustomTranslationModelPath);
+deepseekTranslationForm?.addEventListener("input", () => {
+  translationSettingsTouched = true;
+});
+deeplxTranslationForm?.addEventListener("input", () => {
+  translationSettingsTouched = true;
+});
+deepseekTranslationForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  deepseekTestResult.innerHTML = "正在保存 DeepSeek 配置...";
+  try {
+    await saveTranslationSettings("online", "deepseek");
+    deepseekTestResult.innerHTML = `<span class="ok">DeepSeek 配置已保存。</span>`;
+  } catch (error) {
+    deepseekTestResult.innerHTML = `<span class="bad">${escapeHtml(error instanceof Error ? error.message : "保存失败")}</span>`;
+  }
+});
+testDeepseekBtn?.addEventListener("click", testDeepseekTranslation);
+deeplxTranslationForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  deeplxTestResult.innerHTML = "正在保存 DeepLX 配置...";
+  try {
+    await saveTranslationSettings("online", "deeplx");
+    deeplxTestResult.innerHTML = `<span class="ok">DeepLX 配置已保存。</span>`;
+  } catch (error) {
+    deeplxTestResult.innerHTML = `<span class="bad">${escapeHtml(error instanceof Error ? error.message : "保存失败")}</span>`;
+  }
+});
+testDeeplxBtn?.addEventListener("click", testDeeplxTranslation);
+translationModeForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const mode = translationModeForm.elements.mode.value;
+  if (translationModeBadge) {
+    translationModeBadge.textContent = "保存中";
+    translationModeBadge.className = "ready-badge pending";
+  }
+  try {
+    await saveTranslationSettings(mode);
+    if (translationModeBadge) {
+      translationModeBadge.textContent = mode === "online" ? "在线翻译" : "本地翻译";
+    }
+  } catch (error) {
+    if (translationModeBadge) {
+      translationModeBadge.textContent = "保存失败";
+      translationModeBadge.className = "ready-badge blocked";
+    }
+    alert(error instanceof Error ? error.message : "翻译模式保存失败");
+  }
+});
 liveDefaultsForm.addEventListener("submit", saveLiveDefaults);
 refreshConnectionsBtn.addEventListener("click", refreshLiveConnections);
 restartBackendBtn?.addEventListener("click", restartBackend);

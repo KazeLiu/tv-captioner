@@ -8,8 +8,10 @@ $env:PYTHONPATH = ""
 $env:PYTHONHOME = ""
 $env:PYTHONNOUSERSITE = "1"
 $env:PIP_CONFIG_FILE = "NUL"
+
 $distRoot = Join-Path $PSScriptRoot "dist"
 $distDir = Join-Path $distRoot "TVCaptionerBackend"
+$staleOnlineDistDir = Join-Path $distRoot "TVCaptionerBackend-Online"
 $gpuDlcDir = Join-Path $distRoot "TVCaptionerBackend-GGUF-CUDA-DLC"
 $workDir = Join-Path $PSScriptRoot "build\pyinstaller"
 $specDir = Join-Path $PSScriptRoot "build\pyinstaller-spec"
@@ -23,71 +25,24 @@ $gpuDlcFiles = @(
     "_internal\cublasLt64_12.dll"
 )
 
-Write-Host "== TV Captioner portable build ==" -ForegroundColor Cyan
-Write-Host "Project root: $PSScriptRoot"
-Write-Host ""
-
-if (-not (Test-Path ".\.venv\Scripts\python.exe")) {
-    Write-Host "[1/5] Creating runtime environment..." -ForegroundColor Yellow
-    .\setup.ps1
-}
-else {
-    Write-Host "[1/5] Ensuring runtime dependencies..." -ForegroundColor Yellow
-    .\.venv\Scripts\python.exe -m pip install --isolated -r .\requirements.txt
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to install runtime dependencies."
+function Invoke-Pip([string[]]$Arguments, [int]$Retries = 1) {
+    for ($attempt = 1; $attempt -le $Retries; $attempt++) {
+        & .\.venv\Scripts\python.exe -m pip @Arguments
+        if ($LASTEXITCODE -eq 0) {
+            return
+        }
+        if ($attempt -lt $Retries) {
+            Write-Host "pip command failed, retrying ($attempt/$Retries): $($Arguments -join ' ')" -ForegroundColor Yellow
+            Start-Sleep -Seconds 2
+        }
     }
+    throw "pip command failed: $($Arguments -join ' ')"
 }
 
-Write-Host "[2/5] Installing build dependencies..." -ForegroundColor Yellow
-.\.venv\Scripts\python.exe -u -m pip install --isolated -r .\packaging\requirements-build.txt
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to install build dependencies."
-}
-
-if (Test-Path ".\dist\TVCaptionerBackend") {
-    Write-Host "[3/5] Removing previous dist\\TVCaptionerBackend..." -ForegroundColor Yellow
-    Remove-Item -LiteralPath $distDir -Recurse -Force
-}
-if (Test-Path $workDir) {
-    Remove-Item -LiteralPath $workDir -Recurse -Force
-}
-if (Test-Path $specDir) {
-    Remove-Item -LiteralPath $specDir -Recurse -Force
-}
-if (Test-Path $cudaWheelDir) {
-    Remove-Item -LiteralPath $cudaWheelDir -Recurse -Force
-}
-
-Write-Host "[3/5] Preparing optional GGUF CUDA DLC..." -ForegroundColor Yellow
-if (Test-Path $gpuDlcDir) {
-    Remove-Item -LiteralPath $gpuDlcDir -Recurse -Force
-}
-New-Item -ItemType Directory -Force -Path $gpuDlcPayloadDir | Out-Null
-.\.venv\Scripts\python.exe -m pip install --isolated --no-deps --no-cache-dir --target $cudaWheelDir $llamaCudaWheel
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to download GGUF CUDA wheel for DLC."
-}
-
-$cudaLlamaPackage = Join-Path $cudaWheelDir "llama_cpp"
-$cudaLlamaDistInfo = Get-ChildItem -LiteralPath $cudaWheelDir -Directory -Filter "llama_cpp_python-*.dist-info" | Select-Object -First 1
-if (-not (Test-Path $cudaLlamaPackage)) {
-    throw "GGUF CUDA wheel did not contain llama_cpp package."
-}
-
-$dlcInternal = Join-Path $gpuDlcPayloadDir "_internal"
-$dlcLlamaPackage = Join-Path $dlcInternal "llama_cpp"
-if (Test-Path $dlcLlamaPackage) {
-    Remove-Item -LiteralPath $dlcLlamaPackage -Recurse -Force
-}
-New-Item -ItemType Directory -Force -Path $dlcInternal | Out-Null
-Copy-Item -LiteralPath $cudaLlamaPackage -Destination $dlcLlamaPackage -Recurse -Force
-if ($cudaLlamaDistInfo) {
-    $dlcDistInfo = Join-Path $dlcInternal $cudaLlamaDistInfo.Name
-    if (Test-Path $dlcDistInfo) {
-        Remove-Item -LiteralPath $dlcDistInfo -Recurse -Force
+function Remove-IfExists([string]$Path) {
+    if (Test-Path $Path) {
+        Remove-Item -LiteralPath $Path -Recurse -Force
     }
-    Copy-Item -LiteralPath $cudaLlamaDistInfo.FullName -Destination $dlcDistInfo -Recurse -Force
 }
 
 function Find-CudaDll([string]$dllName) {
@@ -111,20 +66,9 @@ function Find-CudaDll([string]$dllName) {
     return $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
 }
 
-foreach ($relativePath in $gpuDlcFiles) {
-    $dllName = Split-Path -Leaf $relativePath
-    $sourcePath = Find-CudaDll $dllName
-    if (-not $sourcePath) {
-        Write-Host "Optional CUDA DLL not found on this machine: $dllName" -ForegroundColor Yellow
-        continue
-    }
-    $targetPath = Join-Path $gpuDlcPayloadDir $relativePath
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $targetPath) | Out-Null
-    Copy-Item -LiteralPath $sourcePath -Destination $targetPath -Force
-    Write-Host "Added to DLC: $relativePath"
-}
-
-$dlcReadme = @"
+function New-GgufCudaDlc {
+    Write-Host "[3/5] Preparing optional GGUF CUDA DLC..." -ForegroundColor Yellow
+    $dlcReadme = @"
 TV Captioner Backend GGUF CUDA DLC
 
 This folder contains optional GGUF translation GPU runtime files.
@@ -137,13 +81,84 @@ How to install:
 
 Without this DLC, the base package still works and GGUF translation runs on CPU.
 "@
-$dlcReadme | Set-Content -LiteralPath (Join-Path $gpuDlcDir "README-GGUF-CUDA-DLC.txt") -Encoding UTF8
+
+    $requiredDlcFiles = @(
+        "_internal\llama_cpp\lib\ggml-cuda.dll",
+        "_internal\cublas64_12.dll",
+        "_internal\cublasLt64_12.dll"
+    )
+    $dlcReady = $true
+    foreach ($relativePath in $requiredDlcFiles) {
+        if (-not (Test-Path (Join-Path $gpuDlcPayloadDir $relativePath))) {
+            $dlcReady = $false
+            break
+        }
+    }
+    if ($dlcReady) {
+        Write-Host "Existing GGUF CUDA DLC is complete; reusing it without downloading again."
+        $dlcReadme | Set-Content -LiteralPath (Join-Path $gpuDlcDir "README-GGUF-CUDA-DLC.txt") -Encoding UTF8
+        return
+    }
+
+    Remove-IfExists $gpuDlcDir
+    Remove-IfExists $cudaWheelDir
+    New-Item -ItemType Directory -Force -Path $gpuDlcPayloadDir | Out-Null
+
+    Invoke-Pip -Arguments @("install", "--isolated", "--no-deps", "--no-cache-dir", "--target", $cudaWheelDir, $llamaCudaWheel) -Retries 3
+
+    $cudaLlamaPackage = Join-Path $cudaWheelDir "llama_cpp"
+    $cudaLlamaDistInfo = Get-ChildItem -LiteralPath $cudaWheelDir -Directory -Filter "llama_cpp_python-*.dist-info" | Select-Object -First 1
+    if (-not (Test-Path $cudaLlamaPackage)) {
+        throw "GGUF CUDA wheel did not contain llama_cpp package."
+    }
+
+    $dlcInternal = Join-Path $gpuDlcPayloadDir "_internal"
+    New-Item -ItemType Directory -Force -Path $dlcInternal | Out-Null
+    Copy-Item -LiteralPath $cudaLlamaPackage -Destination (Join-Path $dlcInternal "llama_cpp") -Recurse -Force
+    if ($cudaLlamaDistInfo) {
+        Copy-Item -LiteralPath $cudaLlamaDistInfo.FullName -Destination (Join-Path $dlcInternal $cudaLlamaDistInfo.Name) -Recurse -Force
+    }
+
+    foreach ($relativePath in $gpuDlcFiles) {
+        $dllName = Split-Path -Leaf $relativePath
+        $sourcePath = Find-CudaDll $dllName
+        if (-not $sourcePath) {
+            Write-Host "Optional CUDA DLL not found on this machine: $dllName" -ForegroundColor Yellow
+            continue
+        }
+        $targetPath = Join-Path $gpuDlcPayloadDir $relativePath
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $targetPath) | Out-Null
+        Copy-Item -LiteralPath $sourcePath -Destination $targetPath -Force
+        Write-Host "Added to DLC: $relativePath"
+    }
+
+    $dlcReadme | Set-Content -LiteralPath (Join-Path $gpuDlcDir "README-GGUF-CUDA-DLC.txt") -Encoding UTF8
+}
+
+Write-Host "== TV Captioner portable build ==" -ForegroundColor Cyan
+Write-Host "Project root: $PSScriptRoot"
+Write-Host ""
+
+if (-not (Test-Path ".\.venv\Scripts\python.exe")) {
+    Write-Host "[1/5] Creating runtime environment..." -ForegroundColor Yellow
+    .\setup.ps1
+}
+else {
+    Write-Host "[1/5] Ensuring runtime dependencies..." -ForegroundColor Yellow
+    Invoke-Pip @("install", "--isolated", "-r", ".\requirements.txt")
+}
+
+Write-Host "[2/5] Installing build dependencies..." -ForegroundColor Yellow
+Invoke-Pip @("install", "--isolated", "-r", ".\packaging\requirements-build.txt")
+
+Remove-IfExists $distDir
+Remove-IfExists $staleOnlineDistDir
+Remove-IfExists $workDir
+Remove-IfExists $specDir
+New-GgufCudaDlc
 
 Write-Host "Ensuring base package uses CPU GGUF runtime..." -ForegroundColor Yellow
-.\.venv\Scripts\python.exe -m pip install --isolated --force-reinstall --no-deps --no-cache-dir $llamaCpuWheel
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to install CPU GGUF runtime for the base package."
-}
+Invoke-Pip @("install", "--isolated", "--force-reinstall", "--no-deps", "--no-cache-dir", $llamaCpuWheel)
 
 Write-Host "[4/5] Running PyInstaller..." -ForegroundColor Yellow
 & .\.venv\Scripts\python.exe -u -m PyInstaller `
@@ -198,5 +213,5 @@ Write-Host ""
 Write-Host "Optional GGUF CUDA DLC folder:" -ForegroundColor Green
 Write-Host $gpuDlcDir
 Write-Host ""
-Write-Host "Release the base dist\TVCaptionerBackend folder for CPU/default use."
+Write-Host "Release dist\TVCaptionerBackend for regular CPU/default use."
 Write-Host "Release dist\TVCaptionerBackend-GGUF-CUDA-DLC separately for users who want GGUF GPU translation."

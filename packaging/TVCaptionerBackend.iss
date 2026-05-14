@@ -1,5 +1,5 @@
 #define AppName "TV Captioner Backend"
-#define AppVersion "0.1.4"
+#define AppVersion "0.2"
 #define AppPublisher "TV Captioner"
 #define SourceDir "..\dist\TVCaptionerBackend"
 
