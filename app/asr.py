@@ -88,15 +88,18 @@ def asr_cuda_status() -> dict[str, Any]:
     missing_dlls = _cuda_missing_dlls_if_unavailable(available)
 
     if cuda_device_count <= 0:
-        detail = "未检测到可用的 NVIDIA CUDA GPU；当前会使用 CPU。"
+        detail = "未检测到可用的 NVIDIA CUDA GPU；转写会使用 CPU。"
     elif not available:
         if missing_dlls:
-            detail = f"检测到 {cuda_device_count} 个 CUDA GPU，但缺少运行库：{', '.join(missing_dlls)}。"
+            detail = (
+                f"检测到 {cuda_device_count} 个 CUDA GPU，但缺少 CUDA 12 运行库："
+                f"{', '.join(missing_dlls)}；转写会使用 CPU。"
+            )
         else:
-            detail = f"检测到 {cuda_device_count} 个 CUDA GPU，但 CUDA 运行库不可用：{cuda_error}"
+            detail = f"检测到 {cuda_device_count} 个 CUDA GPU，但 CUDA 运行库不可用：{cuda_error}；转写会使用 CPU。"
     else:
         compute_type_detail = ", ".join(supported_compute_types) if supported_compute_types else "auto"
-        detail = f"检测到 {cuda_device_count} 个 CUDA GPU；支持计算类型：{compute_type_detail}。"
+        detail = f"转写 CUDA 运行库已可用；检测到 {cuda_device_count} 个 CUDA GPU；支持计算类型：{compute_type_detail}。"
 
     return {
         "available": available,

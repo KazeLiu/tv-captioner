@@ -179,7 +179,7 @@
 
         <section class="band translation-local-panel">
           <h2>翻译测试</h2>
-          <p id="translationGpuHint" class="section-note">正在检测 GGUF 运行库；翻译环境只显示当前运行方式，GPU 层数请到直播高级参数里设置。</p>
+          <p id="translationGpuHint" class="section-note">正在检测 GGUF 翻译运行库；普通包默认使用 CPU，只有安装 GPU DLC 或系统 CUDA 12 运行库后，才需要设置 GGUF 翻译 GPU 层数。</p>
           <form id="translationTestForm" class="job-form">
             <label>
               媒体文件
@@ -350,7 +350,7 @@
             <h2>直播默认设备</h2>
             <div id="liveDefaultsResult" class="ready-badge pending">未保存</div>
           </div>
-          <p id="liveTranslationGpuHint" class="section-note">直播字幕主要看 ASR 设备：选择 auto 或 cuda 才会用 CUDA。GGUF 翻译是否使用 GPU 由下方高级设备参数里的 GPU 层数决定。</p>
+          <p id="liveTranslationGpuHint" class="section-note">普通包默认使用 CPU。转写 GPU 取决于“转写 CUDA 运行库”是否可用；GGUF 翻译 GPU 需要安装 GPU DLC 或系统 CUDA 12 运行库后，再设置下方 GPU 层数。</p>
           <form id="liveDefaultsForm" class="job-form">
             <div class="grid">
               <label>
@@ -431,7 +431,7 @@
             <h2>后端控制</h2>
             <button id="restartBackendBtn" type="button">重启后端</button>
           </div>
-          <p class="section-note">安装或更新 CUDA 后需要重启后端；重启后到直播标签把 ASR 设备选为 auto 或 cuda，并让电视端重新连接。</p>
+          <p class="section-note">安装或更新 GPU DLC / CUDA 12 运行库后需要重启后端；重启后到直播标签确认 ASR 设备和 GGUF GPU 层数，并让电视端重新连接。</p>
           <div id="restartBackendResult" class="form-result"></div>
         </section>
         <section class="band">

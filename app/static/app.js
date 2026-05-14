@@ -274,6 +274,8 @@ function renderTranslationGpuHint(runtime) {
     return;
   }
   const supportsGpu = Boolean(runtime?.supportsGpuOffload);
+  const cudaReady = Boolean(runtime?.cudaAvailable);
+  const canUseGpu = supportsGpu && cudaReady;
   const runtimeVersion = runtime?.version ? ` ${runtime.version}` : "";
   const layers = Number(runtime?.nGpuLayers || 0);
   const gpuIndex = Number(runtime?.translationGpuIndex || 0);
@@ -285,17 +287,22 @@ function renderTranslationGpuHint(runtime) {
   ];
   const translationLines = usingGpu
     ? [
-        `当前 GGUF 运行库 llama-cpp-python${runtimeVersion} 会按直播默认设置尝试使用 GPU ${gpuIndex}，offload ${layers} 层。`,
+        `当前 GGUF 翻译运行库 llama-cpp-python${runtimeVersion} 会按直播默认设置尝试使用 GPU ${gpuIndex}，offload ${layers} 层。`,
         ...explainLines,
       ]
     : supportsGpu
       ? [
-          `当前 GGUF 运行库 llama-cpp-python${runtimeVersion} 是 CUDA 版，但直播默认 GPU 层数为 0，所以现在按 CPU 跑。`,
-          "要启用 GPU，请到“直播 > 高级设备参数”设置 GGUF 翻译 GPU 层数。",
+          canUseGpu
+            ? `当前 GGUF 翻译运行库 llama-cpp-python${runtimeVersion} 是 CUDA 版，CUDA 12 运行库也已可加载；直播默认 GPU 层数为 0，所以现在按 CPU 跑。`
+            : `当前 GGUF 翻译运行库 llama-cpp-python${runtimeVersion} 是 CUDA 版，但缺少可加载的 CUDA 12 运行库；现在只能按 CPU 跑。`,
+          canUseGpu
+            ? "要启用 GGUF 翻译 GPU，请到“直播 > 高级设备参数”设置 GGUF 翻译 GPU 层数。"
+            : "要启用 GGUF 翻译 GPU，请安装 GPU DLC 或系统 CUDA 12 运行库；未启用前 GPU 层数请保持 0。",
           ...explainLines,
         ]
       : [
-          `当前 GGUF 运行库${runtime?.available ? ` llama-cpp-python${runtimeVersion}` : ""}是 CPU 版或不可用；GGUF 翻译 GPU 层数请保持 0。`,
+          `当前 GGUF 翻译运行库${runtime?.available ? ` llama-cpp-python${runtimeVersion}` : ""}是 CPU 版或不可用；普通包默认就是这个状态，GGUF 翻译 GPU 层数请保持 0。`,
+          "要启用 GGUF 翻译 GPU offload，请安装 GPU DLC。",
           ...explainLines.slice(0, 2),
         ];
   if (translationGpuHint) translationGpuHint.innerHTML = renderNoteLines(translationLines);
@@ -307,12 +314,16 @@ function renderTranslationGpuHint(runtime) {
         ]
       : supportsGpu
         ? [
-            "直播默认翻译当前按 CPU 跑；GGUF 运行库是 CUDA 版，可在高级设备参数里启用 GPU 层数。",
-            "层数表示放进显卡的翻译模型层数；4GB 显存建议从 2-4 层小步测试。",
+            canUseGpu
+              ? "直播默认翻译当前按 CPU 跑；GGUF 翻译运行库和 CUDA 12 运行库都可用，可在高级设备参数里启用 GPU 层数。"
+              : "直播默认翻译当前按 CPU 跑；虽然 GGUF 翻译运行库是 CUDA 版，但当前缺少 CUDA 12 运行库，GPU 层数请保持 0。",
+            canUseGpu
+              ? "层数表示放进显卡的翻译模型层数；4GB 显存建议从 2-4 层小步测试。"
+              : "要启用 GPU，请安装 GPU DLC 或系统 CUDA 12 运行库，然后重启后端。",
           ]
         : [
-            "直播默认翻译当前按 CPU 跑；GGUF 运行库是 CPU 版或不可用，GPU 层数请保持 0。",
-            "层数表示放进显卡的翻译模型层数，不是显卡数量。",
+            "直播默认翻译当前按 CPU 跑；普通包内置的是 GGUF CPU 版运行库，GPU 层数请保持 0。",
+            "要启用 GGUF 翻译 GPU offload，请安装 GPU DLC；层数不是显卡数量。",
           ];
     liveTranslationGpuHint.innerHTML = renderNoteLines(liveLines);
   }
@@ -824,12 +835,12 @@ function renderChecks(target, checks) {
 function renderCudaRecommendation(cuda) {
   if (!cudaRecommendation) return;
   const available = Boolean(cuda?.available);
-  const statusText = available ? "CUDA 已可用" : "推荐启用 CUDA";
-  const detail = cuda?.detail || "安装 NVIDIA CUDA 12 后，ASR 可使用 GPU 加速；未配置时会继续使用 CPU。";
-  const restartHint = " 安装或更新 CUDA 后需要在设置里重启后端；直播标签内 ASR 设备请选择 auto 或 cuda。";
+  const statusText = available ? "转写 CUDA 运行库可用" : "转写当前会使用 CPU";
+  const detail = cuda?.detail || "普通包可直接使用 CPU 转写；如需转写 GPU 加速，请安装 GPU DLC 或系统 CUDA 12 运行库。";
+  const restartHint = " 安装或更新 GPU DLC / CUDA 12 运行库后需要重启后端；直播标签内 ASR 设备可选 auto 或 cuda。";
   const runtimeHint = available
     ? restartHint
-    : ` 本程序当前需要 CUDA 12 运行库；CUDA 13 不能替代缺失的 cublas64_12.dll。${restartHint}`;
+    : ` 普通包默认不带大型 CUDA DLL；没有 GPU DLC 或系统 CUDA 12 运行库时会继续用 CPU。CUDA 13 不能替代缺失的 cublas64_12.dll。${restartHint}`;
   const action = available
     ? ""
     : `<a class="action-link" href="${escapeHtml(cuda?.downloadUrl || "https://developer.nvidia.com/cuda-12-6-3-download-archive")}" target="_blank" rel="noreferrer">下载 CUDA 12</a>`;

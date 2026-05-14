@@ -24,7 +24,7 @@ tv-captioner/
 
 运行时生成的 `data/`、`models/`、`build/`、`dist/`、日志和 `.spec` 文件都在根目录下，并已被 `.gitignore` 忽略。
 
-源码调试默认安装 CPU 版 GGUF 运行库。需要在源码模式测试 GGUF 翻译 GPU offload 时，可在安装基础依赖后运行：
+源码调试默认安装 GGUF CPU 版运行库。需要在源码模式测试 GGUF 翻译 GPU offload 时，可在安装基础依赖后运行：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install --force-reinstall --no-deps -r requirements-gguf-cuda.txt
@@ -44,11 +44,13 @@ tv-captioner/
 
 ## 启动
 
-推荐使用便携版或安装包。便携版基础包会内置 Python 运行时、后端依赖和 GGUF CPU 运行能力；GGUF 翻译 GPU 加速以单独的 CUDA DLC 文件夹发布。构建方式见：
+推荐使用便携版或安装包。便携版基础包会内置 Python 运行时、后端依赖和 GGUF CPU 运行能力；普通包不内置大型 CUDA DLL，未安装 GPU DLC 或系统 CUDA 12 运行库时会按 CPU 跑。需要转写 CUDA 或 GGUF 翻译 GPU offload 的用户，再单独安装 CUDA DLC 文件夹。构建方式见：
 
 ```text
 打包说明.md
 ```
+
+普通版支持 Windows 10/11 64 位，可在无 CUDA 环境下使用 CPU 运行，不需要 NVIDIA 显卡或 GPU DLC。老旧 CPU 或内存较小的设备可能运行缓慢，尤其是 large ASR 模型和本地 GGUF 翻译；如需 NVIDIA GPU 加速，请额外安装 GPU DLC，或安装系统 CUDA 12 运行库后重启后端。
 
 源码目录可以直接启动：
 

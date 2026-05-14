@@ -36,10 +36,11 @@ def _translation_runtime_status(cuda_available: bool, live_defaults: dict[str, A
             "available": False,
             "version": None,
             "supportsGpuOffload": False,
+            "cudaAvailable": cuda_available,
             "mode": "unavailable",
             "nGpuLayers": n_gpu_layers,
             "translationGpuIndex": translation_gpu_index,
-            "detail": "未发现 GGUF 运行库。便携版/安装包应内置该运行库；源码调试请先运行“首次安装并启动.bat”。",
+            "detail": "未发现 GGUF 翻译运行库。普通包应内置 CPU 版；源码调试请先运行“首次安装并启动.bat”。",
         }
 
     try:
@@ -54,10 +55,11 @@ def _translation_runtime_status(cuda_available: bool, live_defaults: dict[str, A
             "available": False,
             "version": None,
             "supportsGpuOffload": False,
+            "cudaAvailable": cuda_available,
             "mode": "unavailable",
             "nGpuLayers": n_gpu_layers,
             "translationGpuIndex": translation_gpu_index,
-            "detail": f"GGUF 运行库加载失败：{exc}",
+            "detail": f"GGUF 翻译运行库加载失败：{exc}",
         }
 
     uses_gpu = supports_gpu and cuda_available and n_gpu_layers > 0
@@ -69,19 +71,25 @@ def _translation_runtime_status(cuda_available: bool, live_defaults: dict[str, A
         )
     elif supports_gpu and cuda_available:
         detail = (
-            f"已安装 CUDA 版 llama-cpp-python {version}，GGUF 可用 GPU offload；"
+            f"已安装 GGUF CUDA 版 llama-cpp-python {version}，并且 CUDA 12 运行库可用；"
             "当前直播默认层数为 0，所以翻译仍走 CPU。GGUF 翻译 GPU 层数表示把多少层翻译模型放进显卡；"
             "4GB 显存建议从 2-4 层小步测试。"
         )
+    elif supports_gpu:
+        detail = (
+            f"已安装 GGUF CUDA 版 llama-cpp-python {version}，但当前缺少可加载的 CUDA 12 运行库；"
+            "GGUF 翻译会按 CPU 跑，GPU 层数请保持 0。要启用 GPU，请安装 CUDA 12 运行库或把 GPU DLC 放到后端目录。"
+        )
     else:
         detail = (
-            f"已安装 llama-cpp-python {version}，但当前 GGUF 运行库按 CPU 方式运行；"
-            "GGUF 翻译 GPU 层数请保持 0。"
+            f"已安装 GGUF CPU 版 llama-cpp-python {version}；普通包默认就是这个状态，"
+            "GGUF 翻译会使用 CPU，GPU 层数请保持 0。要启用 GGUF GPU offload，请安装 GPU DLC。"
         )
     return {
         "available": True,
         "version": version,
         "supportsGpuOffload": supports_gpu,
+        "cudaAvailable": cuda_available,
         "mode": "gpu" if uses_gpu else "cpu",
         "nGpuLayers": n_gpu_layers,
         "translationGpuIndex": translation_gpu_index,
@@ -128,7 +136,7 @@ def environment_status(
         },
         {
             "key": "asr_cuda",
-            "label": "CUDA 加速（推荐）",
+            "label": "转写 CUDA 运行库",
             "required": False,
             "ok": cuda_status["available"],
             "detail": cuda_status["detail"],
@@ -179,7 +187,7 @@ def environment_status(
         },
         {
             "key": "translation_runtime",
-            "label": "GGUF 运行库",
+            "label": "GGUF 翻译运行库",
             "required": True,
             "ok": translation_runtime_ready,
             "detail": translation_runtime["detail"],
