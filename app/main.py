@@ -5,8 +5,10 @@ import importlib.util
 import array
 import json
 import math
+import os
 import queue
 import shutil
+import subprocess
 import sys
 import time
 import uuid
@@ -14,7 +16,7 @@ import wave
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -50,16 +52,66 @@ from .chinese import convert_segment_texts, normalize_chinese_script
 from .environment import environment_status
 from .live_defaults import load_live_defaults, save_live_defaults
 from .live_audio import create_live_session, get_live_session, list_live_sessions, save_live_chunk
-from .live_stream import LiveAudioProcessor, LiveStreamConfig, list_live_connections
+from .live_stream import LiveAudioProcessor, LiveStreamConfig, disconnect_live_connection, list_live_connections
 from .logs import list_events, log_event, subscribe_events, unsubscribe_events
 from .tasks import TaskStore
 from .translate import translate_segments
+from .version import APP_NAME, APP_VERSION, version_info
 
 
 ensure_dirs()
 
-app = FastAPI(title="TV Captioner Backend")
+app = FastAPI(title=APP_NAME, version=APP_VERSION)
 tasks = TaskStore(max_workers=1)
+
+
+def _restart_backend_process() -> None:
+    root = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = ""
+    env["PYTHONHOME"] = ""
+    env["PYTHONNOUSERSITE"] = "1"
+    env.setdefault("TV_CAPTIONER_HOST", "0.0.0.0")
+    env.setdefault("TV_CAPTIONER_PORT", "8765")
+
+    if getattr(sys, "frozen", False):
+        target_args = [sys.executable]
+    else:
+        target_args = [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "app.main:app",
+            "--host",
+            env["TV_CAPTIONER_HOST"],
+            "--port",
+            env["TV_CAPTIONER_PORT"],
+        ]
+
+    creation_flags = 0
+    if sys.platform == "win32":
+        creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+
+    out_path = root / "uvicorn.stdout.log"
+    err_path = root / "uvicorn.stderr.log"
+    launcher = (
+        "import os, subprocess, sys, time\n"
+        "root, out_path, err_path, flags = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])\n"
+        "args = sys.argv[5:]\n"
+        "time.sleep(1.5)\n"
+        "stdout = open(out_path, 'ab')\n"
+        "stderr = open(err_path, 'ab')\n"
+        "subprocess.Popen(args, cwd=root, env=os.environ.copy(), stdout=stdout, stderr=stderr, creationflags=flags)\n"
+    )
+    subprocess.Popen(
+        [sys.executable, "-c", launcher, str(root), str(out_path), str(err_path), str(creation_flags), *target_args],
+        cwd=root,
+        env=env,
+        creationflags=creation_flags,
+        close_fds=True,
+    )
+    time.sleep(0.2)
+    os._exit(0)
 
 
 class LiveSessionCreate(BaseModel):
@@ -365,6 +417,18 @@ def status(
     )
 
 
+@app.get("/api/version")
+def get_version() -> dict:
+    return version_info()
+
+
+@app.post("/api/restart")
+def restart_backend(background_tasks: BackgroundTasks) -> dict:
+    log_event("info", "后端重启已请求", category="system", details={"source": "settings"})
+    background_tasks.add_task(_restart_backend_process)
+    return {"restarting": True}
+
+
 @app.get("/api/tasks")
 def list_tasks() -> list[dict]:
     return [record.to_dict() for record in tasks.list()]
@@ -415,6 +479,14 @@ def update_live_defaults(payload: LiveDefaultsUpdate) -> dict:
 @app.get("/api/live/connections")
 def get_live_connections() -> list[dict]:
     return list_live_connections()
+
+
+@app.delete("/api/live/connections/{session_id}")
+async def close_live_connection(session_id: str) -> dict:
+    disconnected = await disconnect_live_connection(session_id, reason="Disconnected from backend console")
+    if not disconnected:
+        raise HTTPException(status_code=404, detail="Live connection not found")
+    return {"disconnected": True, "id": session_id}
 
 
 @app.get("/api/live/connections/events")

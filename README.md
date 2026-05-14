@@ -24,6 +24,12 @@ tv-captioner/
 
 运行时生成的 `data/`、`models/`、`build/`、`dist/`、日志和 `.spec` 文件都在根目录下，并已被 `.gitignore` 忽略。
 
+源码调试默认安装 CPU 版 GGUF 运行库。需要在源码模式测试 GGUF 翻译 GPU offload 时，可在安装基础依赖后运行：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install --force-reinstall --no-deps -r requirements-gguf-cuda.txt
+```
+
 ## 当前功能
 
 - 网页控制台：`http://127.0.0.1:8765`
@@ -38,7 +44,7 @@ tv-captioner/
 
 ## 启动
 
-推荐使用便携版或安装包。便携版会内置 Python 运行时、后端依赖和 GGUF 运行库，不需要手动安装 `llama-cpp-python`。构建方式见：
+推荐使用便携版或安装包。便携版基础包会内置 Python 运行时、后端依赖和 GGUF CPU 运行能力；GGUF 翻译 GPU 加速以单独的 CUDA DLC 文件夹发布。构建方式见：
 
 ```text
 打包说明.md
@@ -82,7 +88,7 @@ tokenizer.json 或 vocabulary.json
 
 翻译不会用 Ollama。当前使用内置的 `llama-cpp-python` 直接加载 GGUF 模型，更接近 PotPlayer 调 `whisper.cpp` 的模式：下载模型文件，然后程序直接使用。
 
-便携版/安装包会内置 GGUF 运行库，只需要准备 `.gguf` 模型文件。
+便携版/安装包基础包可直接用 CPU 加载 GGUF 模型，只需要准备 `.gguf` 模型文件。需要 GGUF 翻译 GPU 加速时，另行下载 `TVCaptionerBackend-GGUF-CUDA-DLC`，把其中的 `gguf-cuda-dlc` 文件夹复制到 `TVCaptionerBackend` 根目录，然后在“直播 > 高级设备参数”里设置 GGUF 翻译 GPU 层数。以后更新基础包时保留这个 `gguf-cuda-dlc` 文件夹即可继续使用 GPU 版运行库。
 
 网页“翻译”标签页会列出 Qwen GGUF 模型。下载 `.gguf` 文件后，放到对应目录，例如：
 

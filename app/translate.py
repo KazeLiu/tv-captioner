@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 
 _LLAMA_CACHE: dict[tuple[str, int, int, int], Any] = {}
+_LLAMA_RUNTIME: dict[tuple[str, int, int, int], dict[str, Any]] = {}
 _LLAMA_CACHE_LOCK = threading.RLock()
 _LLAMA_INFERENCE_LOCK = threading.RLock()
 
@@ -26,6 +27,43 @@ def resolve_gguf_model_path(path: Path) -> Path:
     return gguf_files[0]
 
 
+def gguf_runtime_status(n_gpu_layers: int, main_gpu: int) -> dict[str, Any]:
+    supports_gpu = False
+    available = False
+    version = None
+    try:
+        import llama_cpp
+
+        available = True
+        version = getattr(llama_cpp, "__version__", None)
+        supports_gpu = bool(getattr(llama_cpp, "llama_supports_gpu_offload", lambda: False)())
+    except Exception:
+        pass
+    uses_gpu = available and supports_gpu and n_gpu_layers > 0
+    return {
+        "available": available,
+        "version": version,
+        "supportsGpuOffload": supports_gpu,
+        "mode": "gpu" if uses_gpu else "cpu",
+        "nGpuLayers": n_gpu_layers if uses_gpu else 0,
+        "requestedNGpuLayers": n_gpu_layers,
+        "translationGpuIndex": main_gpu if uses_gpu else None,
+        "requestedTranslationGpuIndex": main_gpu,
+        "fallback": False,
+    }
+
+
+def cached_gguf_runtime(
+    model_path: Path,
+    n_ctx: int,
+    n_gpu_layers: int,
+    main_gpu: int,
+) -> dict[str, Any]:
+    key = (str(model_path), n_ctx, n_gpu_layers, main_gpu)
+    with _LLAMA_CACHE_LOCK:
+        return dict(_LLAMA_RUNTIME.get(key) or gguf_runtime_status(n_gpu_layers, main_gpu))
+
+
 def _llama(model_path: Path, n_ctx: int, n_gpu_layers: int, main_gpu: int) -> Any:
     key = (str(model_path), n_ctx, n_gpu_layers, main_gpu)
     with _LLAMA_CACHE_LOCK:
@@ -38,14 +76,35 @@ def _llama(model_path: Path, n_ctx: int, n_gpu_layers: int, main_gpu: int) -> An
             raise TranslationRuntimeError(
                 "缺少 llama-cpp-python，无法加载 GGUF 翻译模型。请先安装后再运行翻译测试。"
             ) from exc
+        runtime = gguf_runtime_status(n_gpu_layers, main_gpu)
+        effective_gpu_layers = runtime["nGpuLayers"]
 
-        _LLAMA_CACHE[key] = Llama(
-            model_path=str(model_path),
-            n_ctx=n_ctx,
-            n_gpu_layers=n_gpu_layers,
-            main_gpu=main_gpu,
-            verbose=False,
-        )
+        try:
+            _LLAMA_CACHE[key] = Llama(
+                model_path=str(model_path),
+                n_ctx=n_ctx,
+                n_gpu_layers=effective_gpu_layers,
+                main_gpu=main_gpu,
+                verbose=False,
+            )
+        except Exception:
+            if effective_gpu_layers <= 0:
+                raise
+            _LLAMA_CACHE[key] = Llama(
+                model_path=str(model_path),
+                n_ctx=n_ctx,
+                n_gpu_layers=0,
+                main_gpu=main_gpu,
+                verbose=False,
+            )
+            runtime = {
+                **runtime,
+                "mode": "cpu",
+                "nGpuLayers": 0,
+                "translationGpuIndex": None,
+                "fallback": True,
+            }
+        _LLAMA_RUNTIME[key] = runtime
         return _LLAMA_CACHE[key]
 
 

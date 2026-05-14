@@ -3,49 +3,139 @@ from __future__ import annotations
 import importlib.util
 from typing import Any
 
-from .catalog import ASR_MODELS, TRANSLATION_MODELS, asr_model_path, builtin_asr_model_entry, is_asr_model_ready, translation_model_entry
+from .asr import CUDA_DOWNLOAD_URL, asr_cuda_status
+from .catalog import ASR_MODELS, TRANSLATION_MODELS, builtin_asr_model_entry, translation_model_entry
 from .custom_models import (
-    custom_model_by_key,
     load_custom_models,
     load_custom_translation_models,
     validate_custom_model_path,
     validate_translation_model_path,
 )
+from .live_defaults import load_live_defaults
+
+
+def _model_names(models: list[dict[str, Any]], limit: int = 6) -> str:
+    names = [str(model.get("nameCn") or model.get("label") or model.get("key") or "").strip() for model in models]
+    names = [name for name in names if name]
+    if not names:
+        return ""
+    shown = names[:limit]
+    suffix = f" 等 {len(names)} 个模型" if len(names) > limit else ""
+    return "、".join(shown) + suffix
+
+
+def _required_checks_ready(checks: list[dict[str, Any]]) -> bool:
+    return all(item["ok"] for item in checks if item.get("required") is not False)
+
+
+def _translation_runtime_status(cuda_available: bool, live_defaults: dict[str, Any]) -> dict[str, Any]:
+    n_gpu_layers = max(0, int(live_defaults.get("nGpuLayers") or 0))
+    translation_gpu_index = max(0, int(live_defaults.get("translationGpuIndex") or 0))
+    if importlib.util.find_spec("llama_cpp") is None:
+        return {
+            "available": False,
+            "version": None,
+            "supportsGpuOffload": False,
+            "mode": "unavailable",
+            "nGpuLayers": n_gpu_layers,
+            "translationGpuIndex": translation_gpu_index,
+            "detail": "未发现 GGUF 运行库。便携版/安装包应内置该运行库；源码调试请先运行“首次安装并启动.bat”。",
+        }
+
+    try:
+        import llama_cpp
+
+        supports_gpu = bool(
+            getattr(llama_cpp, "llama_supports_gpu_offload", lambda: False)()
+        )
+        version = getattr(llama_cpp, "__version__", None)
+    except Exception as exc:
+        return {
+            "available": False,
+            "version": None,
+            "supportsGpuOffload": False,
+            "mode": "unavailable",
+            "nGpuLayers": n_gpu_layers,
+            "translationGpuIndex": translation_gpu_index,
+            "detail": f"GGUF 运行库加载失败：{exc}",
+        }
+
+    uses_gpu = supports_gpu and cuda_available and n_gpu_layers > 0
+    if uses_gpu:
+        detail = (
+            f"已安装 CUDA 版 llama-cpp-python {version}；当前直播默认会尝试使用 GPU "
+            f"{translation_gpu_index} offload {n_gpu_layers} 层。若模型加载失败，后端会退回 CPU。"
+        )
+    elif supports_gpu and cuda_available:
+        detail = (
+            f"已安装 CUDA 版 llama-cpp-python {version}，GGUF 可用 GPU offload；"
+            "当前直播默认层数为 0，所以翻译仍走 CPU。要启用 GPU，请到“直播 > 高级设备参数”把 GGUF 翻译 GPU 层数设为 10-20 试起。"
+        )
+    else:
+        detail = (
+            f"已安装 llama-cpp-python {version}，但当前 GGUF 运行库按 CPU 方式运行；"
+            "GGUF 翻译 GPU 层数请保持 0。"
+        )
+    return {
+        "available": True,
+        "version": version,
+        "supportsGpuOffload": supports_gpu,
+        "mode": "gpu" if uses_gpu else "cpu",
+        "nGpuLayers": n_gpu_layers,
+        "translationGpuIndex": translation_gpu_index,
+        "detail": detail,
+    }
 
 
 def environment_status(
     preferred_asr_model: str,
 ) -> dict[str, Any]:
-    custom_model = custom_model_by_key(preferred_asr_model) if preferred_asr_model.startswith("custom:") else None
-    asr_ready = (
-        bool(custom_model and custom_model.get("ready"))
-        if preferred_asr_model.startswith("custom:")
-        else is_asr_model_ready(preferred_asr_model)
-        if preferred_asr_model in ASR_MODELS
-        else False
-    )
+    asr_models = [builtin_asr_model_entry(key) for key in ASR_MODELS]
+    custom_asr_models = [
+        {
+            **model,
+            "custom": True,
+            "ready": (validation := validate_custom_model_path(str(model.get("path", ""))))["ok"],
+            "sizeBytes": validation["sizeBytes"],
+            "validation": validation,
+        }
+        for model in load_custom_models()
+    ]
+    ready_asr_models = [model for model in [*asr_models, *custom_asr_models] if model["ready"]]
     asr_model = ASR_MODELS.get(preferred_asr_model)
-    model_detail = (
-        str(custom_model.get("path"))
-        if custom_model
-        else str(asr_model_path(preferred_asr_model))
-        if preferred_asr_model in ASR_MODELS
-        else "未知模型"
-    )
 
+    cuda_status = asr_cuda_status()
     transcription_checks = [
         {
             "key": "asr_model",
-            "label": f"转写模型 {preferred_asr_model}",
+            "label": "转写模型文件",
             "required": True,
-            "ok": asr_ready,
-            "detail": model_detail,
+            "ok": bool(ready_asr_models),
+            "detail": (
+                f"已安装：{_model_names(ready_asr_models)}。"
+                if ready_asr_models
+                else "未发现可用转写模型，请先在下方选择模型页面下载并放到对应目录。"
+            ),
             "action": None
-            if asr_ready or preferred_asr_model.startswith("custom:") or preferred_asr_model not in ASR_MODELS
+            if ready_asr_models or preferred_asr_model.startswith("custom:") or preferred_asr_model not in ASR_MODELS
             else {
                 "type": "link",
                 "label": "打开模型页",
                 "url": asr_model["url"] if asr_model else "https://huggingface.co/Systran",
+            },
+        },
+        {
+            "key": "asr_cuda",
+            "label": "CUDA 加速（推荐）",
+            "required": False,
+            "ok": cuda_status["available"],
+            "detail": cuda_status["detail"],
+            "action": None
+            if cuda_status["available"]
+            else {
+                "type": "link",
+                "label": "下载 CUDA 12",
+                "url": CUDA_DOWNLOAD_URL,
             },
         },
     ]
@@ -63,7 +153,9 @@ def environment_status(
         for model in load_custom_translation_models()
     ]
     ready_translation_models = [model for model in [*translation_models, *custom_translation_models] if model["ready"]]
-    translation_runtime_ready = importlib.util.find_spec("llama_cpp") is not None
+    live_defaults = load_live_defaults()
+    translation_runtime = _translation_runtime_status(cuda_status["available"], live_defaults)
+    translation_runtime_ready = translation_runtime["available"]
     translation_checks = [
         {
             "key": "translation_model",
@@ -71,7 +163,7 @@ def environment_status(
             "required": True,
             "ok": bool(ready_translation_models),
             "detail": (
-                f"已发现 {len(ready_translation_models)} 个可用 GGUF 模型。"
+                f"已安装：{_model_names(ready_translation_models)}。"
                 if ready_translation_models
                 else "未发现 GGUF 模型文件，请先在下方选择模型页面下载并放到对应目录。"
             ),
@@ -88,14 +180,12 @@ def environment_status(
             "label": "GGUF 运行库",
             "required": True,
             "ok": translation_runtime_ready,
-            "detail": "已安装 llama-cpp-python，可直接加载 GGUF 模型。"
-            if translation_runtime_ready
-            else "未发现 GGUF 运行库。便携版/安装包应内置该运行库；源码调试请先运行“首次安装并启动.bat”。",
+            "detail": translation_runtime["detail"],
             "action": None,
         },
     ]
-    transcription_ready = all(item["ok"] for item in transcription_checks)
-    translation_ready = all(item["ok"] for item in translation_checks)
+    transcription_ready = _required_checks_ready(transcription_checks)
+    translation_ready = _required_checks_ready(translation_checks)
 
     return {
         "ready": transcription_ready,
@@ -105,17 +195,10 @@ def environment_status(
         "translationReady": translation_ready,
         "translationChecks": translation_checks,
         "tools": {},
-        "asrModels": [builtin_asr_model_entry(key) for key in ASR_MODELS],
+        "cuda": cuda_status,
+        "translationRuntime": translation_runtime,
+        "asrModels": asr_models,
         "translationModels": translation_models,
-        "customAsrModels": [
-            {
-                **model,
-                "custom": True,
-                "ready": (validation := validate_custom_model_path(str(model.get("path", ""))))["ok"],
-                "sizeBytes": validation["sizeBytes"],
-                "validation": validation,
-            }
-            for model in load_custom_models()
-        ],
+        "customAsrModels": custom_asr_models,
         "customTranslationModels": custom_translation_models,
     }

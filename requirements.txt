@@ -4,5 +4,5 @@ python-multipart==0.0.20
 numpy==1.26.4
 faster-whisper==1.1.1
 huggingface-hub==0.27.1
-llama-cpp-python==0.3.7
+llama-cpp-python @ https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.23/llama_cpp_python-0.3.23-py3-none-win_amd64.whl
 opencc-python-reimplemented==0.1.7

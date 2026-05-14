@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>TV Captioner Backend</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260513-live-settings-log-stream" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260514-gguf-cuda" />
   </head>
   <body>
     <main class="shell">
@@ -20,6 +20,7 @@
         <button class="tab active" type="button" data-tab="transcribe">转写</button>
         <button class="tab" type="button" data-tab="translate">翻译</button>
         <button class="tab" type="button" data-tab="live">直播</button>
+        <button class="tab" type="button" data-tab="settings">设置</button>
         <button class="tab" type="button" data-tab="logs">日志</button>
       </div>
 
@@ -34,22 +35,23 @@
 
         <section class="band">
           <h2>ASR 模型</h2>
+          <div id="cudaRecommendation" class="cuda-recommendation"></div>
           <form id="customModelForm" class="custom-model-form">
             <label>
               自定义模型标识
-              <input name="key" type="text" placeholder="potplayer-large-v2" />
+              <input name="key" type="text" placeholder="large-v2" />
             </label>
             <label>
               显示名称
-              <input name="label" type="text" placeholder="PotPlayer large-v2" />
+              <input name="label" type="text" placeholder="large-v2" />
             </label>
             <label class="wide">
               模型目录
-              <input name="path" type="text" placeholder="D:\PotPlayer\Models\large-v2" />
+              <input name="path" type="text" placeholder="D:\Models\large-v2" />
             </label>
             <label class="wide">
               备注
-              <input name="description" type="text" placeholder="从 PotPlayer 模型目录添加" />
+              <input name="description" type="text" placeholder="从其他模型目录添加" />
             </label>
             <div class="actions">
               <button type="submit">添加自定义模型</button>
@@ -97,6 +99,7 @@
                 源语言
                 <select name="source_language">
                   <option value="">auto</option>
+                  <option value="zh">zh 中文</option>
                   <option value="ja">ja 日语</option>
                   <option value="ko">ko 韩语</option>
                   <option value="ar">ar 阿拉伯语</option>
@@ -176,6 +179,7 @@
 
         <section class="band">
           <h2>翻译测试</h2>
+          <p id="translationGpuHint" class="section-note">正在检测 GGUF 运行库；翻译环境只显示当前运行方式，GPU 层数请到直播高级参数里设置。</p>
           <form id="translationTestForm" class="job-form">
             <label>
               媒体文件
@@ -221,6 +225,7 @@
                 原文语言
                 <select name="source_language">
                   <option value="">auto</option>
+                  <option value="zh">zh 中文</option>
                   <option value="ja">ja 日语</option>
                   <option value="ko">ko 韩语</option>
                   <option value="ar">ar 阿拉伯语</option>
@@ -238,7 +243,7 @@
                 </select>
               </label>
               <label>
-                设备
+                ASR 设备
                 <select name="device">
                   <option value="auto">auto</option>
                   <option value="cuda">cuda</option>
@@ -250,7 +255,7 @@
                 <input name="device_index" type="number" min="0" step="1" value="0" />
               </label>
               <label>
-                计算类型
+                ASR 计算类型
                 <select name="compute_type">
                   <option value="auto">auto</option>
                   <option value="float16">float16</option>
@@ -259,15 +264,15 @@
                 </select>
               </label>
               <label>
-                上下文长度
+                GGUF 翻译上下文长度
                 <input name="n_ctx" type="number" min="1024" step="512" value="4096" />
               </label>
               <label>
-                GPU 层数
+                GGUF 翻译 GPU 层数
                 <input name="n_gpu_layers" type="number" min="0" step="1" value="0" />
               </label>
               <label>
-                翻译 GPU 编号
+                GGUF 翻译 GPU 编号
                 <input name="translation_gpu_index" type="number" min="0" step="1" value="0" />
               </label>
             </div>
@@ -289,6 +294,7 @@
             <h2>直播默认设备</h2>
             <div id="liveDefaultsResult" class="ready-badge pending">未保存</div>
           </div>
+          <p id="liveTranslationGpuHint" class="section-note">直播字幕主要看 ASR 设备：选择 auto 或 cuda 才会用 CUDA。GGUF 翻译是否使用 GPU 由下方高级设备参数里的 GPU 层数决定。</p>
           <form id="liveDefaultsForm" class="job-form">
             <div class="grid">
               <label>
@@ -299,28 +305,33 @@
                   <option value="cpu">cpu</option>
                 </select>
               </label>
-              <label>
-                ASR GPU 编号
-                <input name="deviceIndex" type="number" min="0" step="1" value="0" />
-              </label>
-              <label>
-                ASR 计算类型
-                <select name="computeType">
-                  <option value="auto">auto</option>
-                  <option value="float16">float16</option>
-                  <option value="int8_float16">int8_float16</option>
-                  <option value="int8">int8</option>
-                </select>
-              </label>
-              <label>
-                翻译 GPU 层数
-                <input name="nGpuLayers" type="number" min="0" step="1" value="0" />
-              </label>
-              <label>
-                翻译 GPU 编号
-                <input name="translationGpuIndex" type="number" min="0" step="1" value="0" />
-              </label>
             </div>
+            <details class="advanced-settings">
+              <summary>高级设备参数</summary>
+              <div class="grid">
+                <label>
+                  ASR GPU 编号
+                  <input name="deviceIndex" type="number" min="0" step="1" value="0" />
+                </label>
+                <label>
+                  ASR 计算模式
+                  <select name="computeType">
+                    <option value="auto">auto</option>
+                    <option value="float16">float16</option>
+                    <option value="int8_float16">int8_float16</option>
+                    <option value="int8">int8</option>
+                  </select>
+                </label>
+                <label>
+                  GGUF 翻译 GPU 层数
+                  <input name="nGpuLayers" type="number" min="0" step="1" value="0" />
+                </label>
+                <label>
+                  GGUF 翻译 GPU 编号
+                  <input name="translationGpuIndex" type="number" min="0" step="1" value="0" />
+                </label>
+              </div>
+            </details>
             <div class="actions">
               <button type="submit">保存默认设备</button>
             </div>
@@ -332,7 +343,40 @@
             <h2>当前直播连接</h2>
             <button id="refreshConnectionsBtn" type="button">刷新连接</button>
           </div>
+          <p class="section-note">空闲超过 30 分钟的直播连接会由后端自动断开；调试播放器没有正常退出时，也可以在这里手动断开。</p>
           <div id="liveConnectionList" class="connection-list"></div>
+        </section>
+      </section>
+
+      <section id="tab-settings" class="tab-panel">
+        <section class="band">
+          <div class="section-title">
+            <h2>版本信息</h2>
+            <div id="versionRuntimeBadge" class="ready-badge pending">读取中</div>
+          </div>
+          <div class="status-grid">
+            <div class="tile">
+              <strong>当前版本</strong>
+              <div id="appVersionValue" class="version-value">-</div>
+            </div>
+            <div class="tile">
+              <strong>运行方式</strong>
+              <div id="appRuntimeValue" class="version-value">-</div>
+            </div>
+            <div class="tile">
+              <strong>程序时间</strong>
+              <div id="appBuildTimeValue" class="version-value">-</div>
+            </div>
+          </div>
+          <div id="appExecutableValue" class="meta version-path">-</div>
+        </section>
+        <section class="band">
+          <div class="section-title">
+            <h2>后端控制</h2>
+            <button id="restartBackendBtn" type="button">重启后端</button>
+          </div>
+          <p class="section-note">安装或更新 CUDA 后需要重启后端；重启后到直播标签把 ASR 设备选为 auto 或 cuda，并让电视端重新连接。</p>
+          <div id="restartBackendResult" class="form-result"></div>
         </section>
       </section>
 
@@ -387,6 +431,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=20260513-live-settings-log-stream"></script>
+    <script src="/static/app.js?v=20260514-gguf-cuda"></script>
   </body>
 </html>

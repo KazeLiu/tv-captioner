@@ -1,0 +1,3 @@
+# Optional GGUF translation GPU runtime for Windows CUDA 12.x.
+# Install this after requirements.txt only when source-mode GGUF GPU offload is needed.
+llama-cpp-python @ https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.23-cu124/llama_cpp_python-0.3.23-py3-none-win_amd64.whl

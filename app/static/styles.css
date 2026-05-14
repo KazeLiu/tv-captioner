@@ -168,6 +168,18 @@ p {
   font-size: 15px;
 }
 
+.version-value {
+  margin-top: 8px;
+  color: #1c2421;
+  font-size: 20px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.version-path {
+  margin-top: 12px;
+}
+
 .meta {
   color: #5c6761;
   font-size: 13px;
@@ -200,6 +212,31 @@ p {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.cuda-recommendation {
+  border: 1px solid #d8d0c3;
+  border-radius: 8px;
+  background: #fffdf9;
+  padding: 14px;
+  margin-bottom: 14px;
+}
+
+.cuda-recommendation.ready {
+  border-color: #b7dec4;
+  background: #f5fbf6;
+}
+
+.cuda-recommendation.pending {
+  border-color: #dfc38a;
+  background: #fffaf0;
+}
+
+.cuda-recommendation-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
 }
 
 .danger-button {
@@ -257,6 +294,15 @@ summary {
 .job-form {
   display: grid;
   gap: 14px;
+}
+
+.advanced-settings {
+  border-top: 1px solid #ede6dc;
+  padding-top: 10px;
+}
+
+.advanced-settings .grid {
+  margin-top: 12px;
 }
 
 .custom-model-form {
@@ -329,6 +375,92 @@ select {
 .connection {
   display: grid;
   gap: 10px;
+}
+
+.connection-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+}
+
+.connection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.processing-state {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid #ede6dc;
+  padding-top: 10px;
+}
+
+.processing-state strong {
+  color: #24302b;
+  font-size: 14px;
+}
+
+.processing-state span,
+.processing-last {
+  color: #68736d;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.processing-main,
+.processing-pending {
+  display: grid;
+  gap: 4px;
+}
+
+.processing-pending {
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+}
+
+.processing-pending > span:first-child {
+  color: #33403b;
+  font-weight: 700;
+}
+
+.processing-logs {
+  display: grid;
+  gap: 6px;
+  border-top: 1px solid #ede6dc;
+  padding-top: 10px;
+}
+
+.processing-logs > strong {
+  color: #24302b;
+  font-size: 14px;
+}
+
+.processing-log {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  color: #59645f;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.processing-log.error {
+  color: #a33b2e;
+}
+
+.processing-log time {
+  color: #8b958f;
+  white-space: nowrap;
+}
+
+.processing-log-text {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .recent-texts {
@@ -564,6 +696,8 @@ select {
 @media (max-width: 680px) {
   .topbar,
   .model,
+  .cuda-recommendation-main,
+  .connection-head,
   .check-item,
   .log-step,
   .custom-model-form {

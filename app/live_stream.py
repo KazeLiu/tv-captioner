@@ -14,14 +14,16 @@ import numpy as np
 from fastapi import WebSocket, WebSocketDisconnect
 from faster_whisper.vad import VadOptions, get_speech_timestamps
 
-from .asr import transcribe_audio_array
+from .asr import asr_runtime_status, transcribe_audio_array
 from .chinese import convert_segment_texts, normalize_chinese_script
 from .logs import log_event
-from .translate import translate_segments
+from .translate import cached_gguf_runtime, gguf_runtime_status, resolve_gguf_model_path, translate_segments
 
 
 VAD_SAMPLE_RATE = 16000
+LIVE_IDLE_TIMEOUT_SECONDS = 30 * 60
 _LIVE_CONNECTIONS: dict[str, dict[str, Any]] = {}
+_LIVE_PROCESSORS: dict[str, "LiveAudioProcessor"] = {}
 _LIVE_CONNECTIONS_LOCK = threading.RLock()
 
 
@@ -49,6 +51,15 @@ def _update_live_connection(session_id: str, **changes: Any) -> None:
             return
         connection.update(changes)
         connection["updatedAt"] = time.time()
+
+
+async def disconnect_live_connection(session_id: str, reason: str = "Disconnected") -> bool:
+    with _LIVE_CONNECTIONS_LOCK:
+        processor = _LIVE_PROCESSORS.get(session_id)
+    if not processor:
+        return False
+    await processor.request_disconnect(reason)
+    return True
 
 
 def _text_preview(value: str, limit: int = 500) -> str:
@@ -197,6 +208,11 @@ class LiveAudioProcessor:
         self._source_context = ""
         self._translation_context = ""
         self._detected_language: str | None = None
+        self._translation_gguf_path = (
+            resolve_gguf_model_path(config.translation_model_path)
+            if config.translate_enabled and config.translation_model_path
+            else None
+        )
 
         self._bytes_per_frame = max(config.channels, 1) * 2
         self._silence_seconds = config.silence_ms / 1000
@@ -247,9 +263,15 @@ class LiveAudioProcessor:
         )
 
         worker = asyncio.create_task(self._process_queue())
+        idle_monitor = asyncio.create_task(self._monitor_idle_timeout())
         try:
             await self._receive_loop()
         finally:
+            idle_monitor.cancel()
+            try:
+                await idle_monitor
+            except asyncio.CancelledError:
+                pass
             await self._flush_current(forced=True)
             await self._stop_partial_task()
             await self._queue.put(None)
@@ -261,6 +283,41 @@ class LiveAudioProcessor:
                 category="live",
                 details={"sessionId": self.session_id},
             )
+
+    async def request_disconnect(self, reason: str) -> None:
+        _update_live_connection(
+            self.session_id,
+            status="disconnecting",
+            lastEvent="disconnect_requested",
+            disconnectReason=reason,
+        )
+        await self._send_json({"type": "close", "reason": reason})
+        try:
+            await self.websocket.close(code=1000, reason=reason[:120])
+        except (RuntimeError, WebSocketDisconnect):
+            pass
+
+    async def _monitor_idle_timeout(self) -> None:
+        while True:
+            await asyncio.sleep(15)
+            with _LIVE_CONNECTIONS_LOCK:
+                connection = _LIVE_CONNECTIONS.get(self.session_id)
+                updated_at = float(connection.get("updatedAt") or 0) if connection else 0
+            if not updated_at:
+                continue
+            if time.time() - updated_at >= LIVE_IDLE_TIMEOUT_SECONDS:
+                log_event(
+                    "warning",
+                    "WebSocket live session idle timeout",
+                    category="live",
+                    details={
+                        "sessionId": self.session_id,
+                        "clientIp": self.client_ip,
+                        "idleSeconds": round(time.time() - updated_at, 3),
+                    },
+                )
+                await self.request_disconnect("Idle for 30 minutes")
+                return
 
     async def _receive_loop(self) -> None:
         while True:
@@ -375,6 +432,7 @@ class LiveAudioProcessor:
             return
 
         await self._queue.put(utterance)
+        self._append_pending_utterance(utterance)
         self._update_connection_counters(queuedSegments=1, lastEvent="speech_end")
         log_event(
             "info",
@@ -546,7 +604,7 @@ class LiveAudioProcessor:
             if utterance is None:
                 return
             await self._send_json({"type": "processing", "id": utterance.id})
-            _update_live_connection(self.session_id, lastEvent="processing")
+            self._start_processing_utterance(utterance)
             try:
                 payload = await asyncio.to_thread(self._process_utterance, utterance)
             except Exception as exc:  # noqa: BLE001 - surfaced to WebSocket client
@@ -561,10 +619,23 @@ class LiveAudioProcessor:
                         "error": str(exc),
                     },
                 )
+                self._finish_processing_utterance(
+                    utterance,
+                    status="error",
+                    message="处理失败",
+                    error=str(exc),
+                )
                 self._update_connection_counters(errorCount=1, queuedSegments=-1, lastEvent="error")
                 await self._send_json({"type": "error", "id": utterance.id, "message": str(exc)})
                 continue
 
+            source_text = _segments_text(payload.get("segments") or [], "text")
+            self._finish_processing_utterance(
+                utterance,
+                status="done",
+                message="处理完成",
+                source_text=source_text,
+            )
             self._update_connection_counters(segmentCount=1, queuedSegments=-1, lastEvent="segment")
             await self._send_json(payload)
 
@@ -581,7 +652,27 @@ class LiveAudioProcessor:
         requested_language = self.config.source_language
 
         def update(**changes: Any) -> None:
-            pass
+            message = str(changes.get("message") or "")
+            stage_labels = {
+                "Loading ASR model": "正在加载 ASR 模型",
+                "Transcribing media": "正在转写音频",
+                "Translating subtitles": "正在翻译字幕",
+            }
+            if message.startswith("Loading translation model:"):
+                model_name = message.replace("Loading translation model:", "").strip()
+                display_message = f"正在加载翻译模型：{model_name}" if model_name else "正在加载翻译模型"
+            else:
+                display_message = stage_labels.get(message, message or "正在处理")
+            self._update_current_processing(
+                status="processing",
+                message=display_message,
+                progress=changes.get("progress"),
+            )
+            self._append_processing_log(
+                display_message,
+                utterance,
+                progress=changes.get("progress"),
+            )
 
         asr_result = transcribe_audio_array(
             audio=audio,
@@ -596,6 +687,7 @@ class LiveAudioProcessor:
             vad_filter=False,
             condition_on_previous_text=False,
         )
+        self._set_runtime_status(asr_runtime=asr_result.get("runtime"))
         detected_language = asr_result.get("language") or requested_language
         self._detected_language = detected_language
 
@@ -633,7 +725,7 @@ class LiveAudioProcessor:
         if self.config.translate_enabled and self.config.translation_model_path:
             output_segments = translate_segments(
                 segments=segments,
-                model_path=self.config.translation_model_path,
+                model_path=self._translation_gguf_path or self.config.translation_model_path,
                 source_language=requested_language or detected_language,
                 target_language=self.config.target_language,
                 update=update,
@@ -642,6 +734,15 @@ class LiveAudioProcessor:
                 main_gpu=self.config.translation_gpu_index,
                 previous_context=self._translation_context,
             )
+            if self._translation_gguf_path:
+                self._set_runtime_status(
+                    translation_runtime=cached_gguf_runtime(
+                        self._translation_gguf_path,
+                        self.config.n_ctx,
+                        self.config.n_gpu_layers,
+                        self.config.translation_gpu_index,
+                    )
+                )
             output_segments = convert_segment_texts(output_segments, self.config.chinese_script)
             self._update_context(output_segments)
             log_event(
@@ -686,6 +787,7 @@ class LiveAudioProcessor:
     def _register_connection(self) -> None:
         now = time.time()
         with _LIVE_CONNECTIONS_LOCK:
+            _LIVE_PROCESSORS[self.session_id] = self
             _LIVE_CONNECTIONS[self.session_id] = {
                 "id": self.session_id,
                 "status": "connected",
@@ -703,9 +805,20 @@ class LiveAudioProcessor:
                 "device": self.config.device,
                 "deviceIndex": self.config.device_index,
                 "computeType": self.config.compute_type,
+                "asrRuntime": asr_runtime_status(
+                    self.config.device,
+                    self.config.device_index,
+                    self.config.compute_type,
+                ),
                 "nCtx": self.config.n_ctx,
                 "nGpuLayers": self.config.n_gpu_layers,
                 "translationGpuIndex": self.config.translation_gpu_index,
+                "translationRuntime": gguf_runtime_status(
+                    self.config.n_gpu_layers,
+                    self.config.translation_gpu_index,
+                )
+                if self.config.translate_enabled
+                else None,
                 "codec": self.config.codec,
                 "sampleRate": self.config.sample_rate,
                 "channels": self.config.channels,
@@ -724,12 +837,23 @@ class LiveAudioProcessor:
                 "segmentCount": 0,
                 "errorCount": 0,
                 "recentTexts": [],
+                "pendingUtterances": [],
+                "currentProcessing": None,
+                "lastProcessed": None,
+                "processingLogs": [
+                    {
+                        "at": now,
+                        "level": "info",
+                        "message": "连接已建立，等待电视端发送音频",
+                    }
+                ],
                 "lastEvent": "connected",
             }
 
     def _unregister_connection(self) -> None:
         with _LIVE_CONNECTIONS_LOCK:
             _LIVE_CONNECTIONS.pop(self.session_id, None)
+            _LIVE_PROCESSORS.pop(self.session_id, None)
 
     def _update_connection_counters(self, **changes: Any) -> None:
         with _LIVE_CONNECTIONS_LOCK:
@@ -749,6 +873,19 @@ class LiveAudioProcessor:
                 else:
                     connection[key] = value
             connection["updatedAt"] = time.time()
+
+    def _set_runtime_status(
+        self,
+        asr_runtime: dict[str, Any] | None = None,
+        translation_runtime: dict[str, Any] | None = None,
+    ) -> None:
+        changes: dict[str, Any] = {}
+        if asr_runtime:
+            changes["asrRuntime"] = asr_runtime
+        if translation_runtime:
+            changes["translationRuntime"] = translation_runtime
+        if changes:
+            _update_live_connection(self.session_id, **changes)
 
     def _append_recent_text(
         self,
@@ -777,6 +914,147 @@ class LiveAudioProcessor:
             )
             connection["recentTexts"] = recent[-8:]
             connection["updatedAt"] = time.time()
+
+    def _utterance_summary(
+        self,
+        utterance: LiveUtterance,
+        status: str,
+        message: str,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        return {
+            "id": utterance.id,
+            "sequence": utterance.id.rsplit("-", 1)[-1],
+            "status": status,
+            "message": message,
+            "start": utterance.start,
+            "end": utterance.end,
+            "duration": max(0.0, utterance.end - utterance.start),
+            "forced": utterance.forced,
+            **extra,
+        }
+
+    def _append_processing_log(
+        self,
+        message: str,
+        utterance: LiveUtterance | None = None,
+        level: str = "info",
+        **extra: Any,
+    ) -> None:
+        now = time.time()
+        item = {
+            "at": now,
+            "level": level,
+            "message": message,
+            **extra,
+        }
+        if utterance is not None:
+            item.update(
+                {
+                    "utteranceId": utterance.id,
+                    "sequence": utterance.id.rsplit("-", 1)[-1],
+                    "duration": max(0.0, utterance.end - utterance.start),
+                }
+            )
+
+        with _LIVE_CONNECTIONS_LOCK:
+            connection = _LIVE_CONNECTIONS.get(self.session_id)
+            if not connection:
+                return
+            logs = list(connection.get("processingLogs") or [])
+            last = logs[-1] if logs else {}
+            if (
+                last.get("message") == item.get("message")
+                and last.get("utteranceId") == item.get("utteranceId")
+                and last.get("level") == item.get("level")
+            ):
+                logs[-1] = {**last, **item}
+            else:
+                logs.append(item)
+            connection["processingLogs"] = logs[-12:]
+            connection["updatedAt"] = now
+
+    def _append_pending_utterance(self, utterance: LiveUtterance) -> None:
+        pending_item = self._utterance_summary(
+            utterance,
+            status="queued",
+            message="排队等待处理",
+            queuedAt=time.time(),
+        )
+        with _LIVE_CONNECTIONS_LOCK:
+            connection = _LIVE_CONNECTIONS.get(self.session_id)
+            if not connection:
+                return
+            pending = [
+                item
+                for item in list(connection.get("pendingUtterances") or [])
+                if item.get("id") != utterance.id
+            ]
+            pending.append(pending_item)
+            connection["pendingUtterances"] = pending[-12:]
+            connection["updatedAt"] = time.time()
+        self._append_processing_log("收到音频，已加入处理队列", utterance, queueSize=self._queue.qsize())
+
+    def _start_processing_utterance(self, utterance: LiveUtterance) -> None:
+        processing = self._utterance_summary(
+            utterance,
+            status="processing",
+            message="准备处理音频",
+            queuedAt=None,
+            startedAt=time.time(),
+        )
+        with _LIVE_CONNECTIONS_LOCK:
+            connection = _LIVE_CONNECTIONS.get(self.session_id)
+            if not connection:
+                return
+            connection["pendingUtterances"] = [
+                item
+                for item in list(connection.get("pendingUtterances") or [])
+                if item.get("id") != utterance.id
+            ]
+            connection["currentProcessing"] = processing
+            connection["lastEvent"] = "processing"
+            connection["updatedAt"] = time.time()
+        self._append_processing_log("开始处理这段音频", utterance)
+
+    def _update_current_processing(self, **changes: Any) -> None:
+        with _LIVE_CONNECTIONS_LOCK:
+            connection = _LIVE_CONNECTIONS.get(self.session_id)
+            if not connection:
+                return
+            current = dict(connection.get("currentProcessing") or {})
+            if not current:
+                return
+            current.update({key: value for key, value in changes.items() if value is not None})
+            current["updatedAt"] = time.time()
+            connection["currentProcessing"] = current
+            connection["updatedAt"] = time.time()
+
+    def _finish_processing_utterance(
+        self,
+        utterance: LiveUtterance,
+        status: str,
+        message: str,
+        source_text: str = "",
+        error: str = "",
+    ) -> None:
+        finished = self._utterance_summary(
+            utterance,
+            status=status,
+            message=message,
+            finishedAt=time.time(),
+            sourceText=source_text,
+            error=error,
+        )
+        with _LIVE_CONNECTIONS_LOCK:
+            connection = _LIVE_CONNECTIONS.get(self.session_id)
+            if not connection:
+                return
+            connection["currentProcessing"] = None
+            connection["lastProcessed"] = finished
+            connection["updatedAt"] = time.time()
+        level = "error" if status == "error" else "info"
+        self._append_processing_log(message, utterance, level=level, sourceText=source_text, error=error)
 
     def _update_context(self, segments: list[dict[str, Any]]) -> None:
         source_parts = [str(segment.get("text") or "").strip() for segment in segments]

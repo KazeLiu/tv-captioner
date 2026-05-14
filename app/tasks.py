@@ -58,7 +58,7 @@ class TaskStore:
             self.update(task_id, **changes)
 
         def run() -> None:
-            self.update(task_id, status="running", message="Started")
+            self.update(task_id, status="running", progress=0.0, message="Started")
             try:
                 result = worker(task_id, update)
                 self.update(

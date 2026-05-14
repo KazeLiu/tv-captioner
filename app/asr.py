@@ -1,30 +1,169 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import math
+import sys
 import threading
 from pathlib import Path
 from typing import Any, Callable
 
+import ctranslate2
 import numpy as np
 from faster_whisper import WhisperModel
 
 
 _MODEL_CACHE: dict[tuple[str, str, str, int], WhisperModel] = {}
 _MODEL_CACHE_LOCK = threading.RLock()
+_WINDOWS_CUDA_RUNTIME_DLLS = ("cublas64_12.dll",)
+CUDA_DOWNLOAD_URL = "https://developer.nvidia.com/cuda-12-6-3-download-archive?target_arch=x86_64&target_os=Windows&target_type=exe_local&target_version=10"
 
 
-def _model(model_path: Path, device: str, compute_type: str, device_index: int) -> WhisperModel:
-    key = (str(model_path), device, compute_type, device_index)
+def _missing_windows_cuda_dlls() -> list[str]:
+    if sys.platform != "win32":
+        return []
+
+    missing: list[str] = []
+    for dll_name in _WINDOWS_CUDA_RUNTIME_DLLS:
+        try:
+            ctypes.WinDLL(dll_name)
+        except OSError:
+            missing.append(dll_name)
+    return missing
+
+
+def _cuda_unavailable_reason() -> str | None:
+    try:
+        cuda_devices = ctranslate2.get_cuda_device_count()
+    except Exception as exc:  # noqa: BLE001 - CTranslate2 reports runtime issues with broad exceptions
+        return str(exc)
+
+    if cuda_devices <= 0:
+        return "No CUDA device was detected."
+
+    try:
+        ctranslate2.get_supported_compute_types("cuda")
+    except Exception as exc:  # noqa: BLE001 - CTranslate2 reports runtime issues with broad exceptions
+        missing_dlls = _missing_windows_cuda_dlls()
+        if missing_dlls:
+            return f"Missing CUDA runtime DLL(s): {', '.join(missing_dlls)}. {exc}"
+        return str(exc)
+
+    return None
+
+
+def _cuda_supported_compute_types() -> tuple[list[str], str]:
+    try:
+        return sorted(ctranslate2.get_supported_compute_types("cuda")), ""
+    except Exception as exc:  # noqa: BLE001 - CTranslate2 reports runtime issues with broad exceptions
+        return [], str(exc)
+
+
+def _cuda_missing_dlls_if_unavailable(available: bool) -> list[str]:
+    if available:
+        return []
+    missing_dlls = _missing_windows_cuda_dlls()
+    return missing_dlls
+
+
+def asr_cuda_status() -> dict[str, Any]:
+    try:
+        cuda_device_count = ctranslate2.get_cuda_device_count()
+    except Exception as exc:  # noqa: BLE001 - CTranslate2 reports runtime issues with broad exceptions
+        return {
+            "available": False,
+            "deviceCount": 0,
+            "supportedComputeTypes": [],
+            "missingDlls": _missing_windows_cuda_dlls(),
+            "detail": str(exc),
+            "downloadUrl": CUDA_DOWNLOAD_URL,
+        }
+
+    supported_compute_types, cuda_error = (
+        _cuda_supported_compute_types() if cuda_device_count > 0 else ([], "")
+    )
+    available = cuda_device_count > 0 and not cuda_error
+    missing_dlls = _cuda_missing_dlls_if_unavailable(available)
+
+    if cuda_device_count <= 0:
+        detail = "未检测到可用的 NVIDIA CUDA GPU；当前会使用 CPU。"
+    elif not available:
+        if missing_dlls:
+            detail = f"检测到 {cuda_device_count} 个 CUDA GPU，但缺少运行库：{', '.join(missing_dlls)}。"
+        else:
+            detail = f"检测到 {cuda_device_count} 个 CUDA GPU，但 CUDA 运行库不可用：{cuda_error}"
+    else:
+        compute_type_detail = ", ".join(supported_compute_types) if supported_compute_types else "auto"
+        detail = f"检测到 {cuda_device_count} 个 CUDA GPU；支持计算类型：{compute_type_detail}。"
+
+    return {
+        "available": available,
+        "deviceCount": cuda_device_count,
+        "supportedComputeTypes": supported_compute_types,
+        "missingDlls": missing_dlls,
+        "detail": detail,
+        "downloadUrl": CUDA_DOWNLOAD_URL,
+    }
+
+
+def _resolve_asr_device(device: str) -> str:
+    requested = (device or "auto").strip().lower()
+    if requested != "auto":
+        return requested
+
+    return "cpu" if _cuda_unavailable_reason() else "cuda"
+
+
+def _is_cuda_runtime_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(token in message for token in ("cublas", "cudnn", "cuda"))
+
+
+def asr_runtime_status(device: str, device_index: int, compute_type: str) -> dict[str, Any]:
+    requested_device = (device or "auto").strip().lower()
+    resolved_device = _resolve_asr_device(requested_device)
+    mode = "gpu" if resolved_device == "cuda" else "cpu"
+    return {
+        "mode": mode,
+        "requestedDevice": requested_device,
+        "device": resolved_device,
+        "deviceIndex": device_index if mode == "gpu" else None,
+        "computeType": compute_type,
+    }
+
+
+def _model(model_path: Path, device: str, compute_type: str, device_index: int) -> tuple[WhisperModel, str]:
+    requested_device = (device or "auto").strip().lower()
+    resolved_device = _resolve_asr_device(device)
+    key = (str(model_path), resolved_device, compute_type, device_index)
     with _MODEL_CACHE_LOCK:
         if key not in _MODEL_CACHE:
-            _MODEL_CACHE[key] = WhisperModel(
-                str(model_path),
-                device=device,
-                device_index=device_index,
-                compute_type=compute_type,
-            )
-        return _MODEL_CACHE[key]
+            try:
+                _MODEL_CACHE[key] = WhisperModel(
+                    str(model_path),
+                    device=resolved_device,
+                    device_index=device_index,
+                    compute_type=compute_type,
+                )
+            except Exception as exc:
+                if requested_device == "auto" and resolved_device == "cuda" and _is_cuda_runtime_error(exc):
+                    cpu_key = (str(model_path), "cpu", compute_type, device_index)
+                    if cpu_key not in _MODEL_CACHE:
+                        _MODEL_CACHE[cpu_key] = WhisperModel(
+                            str(model_path),
+                            device="cpu",
+                            device_index=device_index,
+                            compute_type=compute_type,
+                        )
+                    return _MODEL_CACHE[cpu_key], "cpu"
+                if resolved_device == "cuda" and _is_cuda_runtime_error(exc):
+                    raise RuntimeError(
+                        "ASR CUDA runtime is unavailable. Switch ASR device to cpu, "
+                        "or install CUDA 12/cuDNN runtime DLLs such as cublas64_12.dll "
+                        "and make sure they are on PATH."
+                    ) from exc
+                raise
+        return _MODEL_CACHE[key], resolved_device
 
 
 def format_timestamp(seconds: float) -> str:
@@ -85,8 +224,13 @@ def _transcribe(
     vad_filter: bool = True,
     condition_on_previous_text: bool = True,
 ) -> dict[str, Any]:
-    update(message="Loading ASR model", progress=None)
-    whisper = _model(model_path, device=device, device_index=device_index, compute_type=compute_type)
+    update(message="Loading ASR model", progress=0.01)
+    whisper, runtime_device = _model(
+        model_path,
+        device=device,
+        device_index=device_index,
+        compute_type=compute_type,
+    )
 
     kwargs: dict[str, Any] = {
         "beam_size": beam_size,
@@ -121,6 +265,12 @@ def _transcribe(
         "languageProbability": info.language_probability,
         "duration": duration,
         "segments": segments,
+        "runtime": {
+            **asr_runtime_status(device, device_index, compute_type),
+            "mode": "gpu" if runtime_device == "cuda" else "cpu",
+            "device": runtime_device,
+            "deviceIndex": device_index if runtime_device == "cuda" else None,
+        },
     }
 
 

@@ -202,7 +202,7 @@ def ensure_dirs() -> None:
 def asr_model_path(model_key: str) -> Path:
     if model_key not in ASR_MODELS:
         raise KeyError(model_key)
-    return ASR_MODEL_DIR / model_key
+    return ASR_MODEL_DIR / ASR_MODELS[model_key]["repo_id"].rsplit("/", 1)[-1]
 
 
 def dir_size(path: Path) -> int:
@@ -211,14 +211,18 @@ def dir_size(path: Path) -> int:
     return sum(file.stat().st_size for file in path.rglob("*") if file.is_file())
 
 
-def is_asr_model_ready(model_key: str) -> bool:
-    path = asr_model_path(model_key)
+def _is_asr_model_dir_ready(path: Path) -> bool:
     return path.exists() and (path / "model.bin").exists() and (path / "config.json").exists()
+
+
+def is_asr_model_ready(model_key: str) -> bool:
+    return _is_asr_model_dir_ready(asr_model_path(model_key))
 
 
 def builtin_asr_model_entry(model_key: str) -> dict[str, Any]:
     model = ASR_MODELS[model_key]
     path = asr_model_path(model_key)
+    ready = is_asr_model_ready(model_key)
     return {
         "key": model_key,
         "label": model["label"],
@@ -226,7 +230,7 @@ def builtin_asr_model_entry(model_key: str) -> dict[str, Any]:
         "repoId": model["repo_id"],
         "url": model["url"],
         "description": model["description"],
-        "ready": is_asr_model_ready(model_key),
+        "ready": ready,
         "path": str(path),
         "sizeBytes": dir_size(path),
         "custom": False,
@@ -236,13 +240,17 @@ def builtin_asr_model_entry(model_key: str) -> dict[str, Any]:
 def translation_model_path(model_key: str) -> Path:
     if model_key not in TRANSLATION_MODELS:
         raise KeyError(model_key)
-    return TRANSLATION_MODEL_DIR / model_key
+    return TRANSLATION_MODEL_DIR / TRANSLATION_MODELS[model_key]["repo_id"].rsplit("/", 1)[-1]
+
+
+def _translation_gguf_files(path: Path) -> list[str]:
+    return sorted(item.name for item in path.glob("*.gguf")) if path.exists() else []
 
 
 def translation_model_entry(model_key: str) -> dict[str, Any]:
     model = TRANSLATION_MODELS[model_key]
     path = translation_model_path(model_key)
-    gguf_files = sorted(item.name for item in path.glob("*.gguf")) if path.exists() else []
+    gguf_files = _translation_gguf_files(path)
     return {
         "key": model_key,
         "label": model["label"],

@@ -2,6 +2,7 @@ const transcriptionChecklist = document.querySelector("#transcriptionChecklist")
 const transcriptionReadyBadge = document.querySelector("#transcriptionReadyBadge");
 const translationChecklist = document.querySelector("#translationChecklist");
 const translationReadyBadge = document.querySelector("#translationReadyBadge");
+const cudaRecommendation = document.querySelector("#cudaRecommendation");
 const modelList = document.querySelector("#modelList");
 const translationModelList = document.querySelector("#translationModelList");
 const taskList = document.querySelector("#taskList");
@@ -25,20 +26,32 @@ const customTranslationModelForm = document.querySelector("#customTranslationMod
 const customTranslationModelResult = document.querySelector("#customTranslationModelResult");
 const validateTranslationModelBtn = document.querySelector("#validateTranslationModelBtn");
 const translationTestForm = document.querySelector("#translationTestForm");
+const translationGpuHint = document.querySelector("#translationGpuHint");
 const liveDefaultsForm = document.querySelector("#liveDefaultsForm");
 const liveDefaultsResult = document.querySelector("#liveDefaultsResult");
+const liveTranslationGpuHint = document.querySelector("#liveTranslationGpuHint");
 const liveConnectionList = document.querySelector("#liveConnectionList");
 const refreshConnectionsBtn = document.querySelector("#refreshConnectionsBtn");
+const versionRuntimeBadge = document.querySelector("#versionRuntimeBadge");
+const appVersionValue = document.querySelector("#appVersionValue");
+const appRuntimeValue = document.querySelector("#appRuntimeValue");
+const appBuildTimeValue = document.querySelector("#appBuildTimeValue");
+const appExecutableValue = document.querySelector("#appExecutableValue");
+const restartBackendBtn = document.querySelector("#restartBackendBtn");
+const restartBackendResult = document.querySelector("#restartBackendResult");
 let autoSelectedModel = false;
 let autoSelectedTranslationModel = false;
 let liveDefaultsLoaded = false;
 let latestLogs = [];
+let latestLiveConnections = [];
 let refreshTimer = null;
+let taskRefreshInFlight = false;
 let liveConnectionEvents = null;
 let logEvents = null;
 let logPage = 1;
 const LOG_PAGE_SIZE = 25;
 const highlightedLogKeys = new Set();
+const disconnectingLiveConnections = new Set();
 
 const fmtBytes = (bytes) => {
   if (!bytes) return "0 B";
@@ -118,6 +131,19 @@ const fmtDuration = (seconds) => {
 };
 
 const fmtTime = (timestamp) => (timestamp ? new Date(timestamp * 1000).toLocaleString() : "-");
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const fmtIsoTime = (timestamp) => {
+  if (!timestamp) return "-";
+  const date = new Date(timestamp);
+  return Number.isFinite(date.getTime()) ? date.toLocaleString() : "-";
+};
+
+const fmtAge = (timestamp) => {
+  if (!timestamp) return "";
+  const seconds = Math.max(0, Date.now() / 1000 - Number(timestamp));
+  return fmtDuration(seconds);
+};
 
 async function refreshStatus() {
   const form = new FormData(jobForm);
@@ -139,6 +165,8 @@ async function refreshStatus() {
   );
   renderChecks(transcriptionChecklist, data.transcriptionChecks || data.checks || []);
   renderChecks(translationChecklist, data.translationChecks || []);
+  renderCudaRecommendation(data.cuda);
+  renderTranslationGpuHint(data.translationRuntime);
 
   modelList.innerHTML = "";
   syncAsrModelOptions([...data.asrModels, ...(data.customAsrModels || [])]);
@@ -158,7 +186,7 @@ async function refreshStatus() {
             <summary>查看详情</summary>
             <div class="meta">${model.description}</div>
             <div class="meta">模型仓库：${model.repoId}</div>
-            <div class="meta">本地目录：${model.path}</div>
+            <div class="meta">推荐本地目录：${escapeHtml(model.path)}</div>
             <div class="meta">当前大小：${fmtBytes(model.sizeBytes)}</div>
             ${issues}
           </details>
@@ -193,7 +221,7 @@ async function refreshStatus() {
             <summary>查看详情</summary>
             <div class="meta">${model.description}</div>
             <div class="meta">模型仓库：${model.repoId}</div>
-            <div class="meta">本地目录：${model.path}</div>
+            <div class="meta">推荐本地目录：${escapeHtml(model.path)}</div>
             <div class="meta">模型文件：${files}</div>
             <div class="meta">当前大小：${fmtBytes(model.sizeBytes)}</div>
             ${issues}
@@ -211,6 +239,27 @@ async function refreshStatus() {
 function deleteCustomModelButton(model, type) {
   if (!model.custom || model.ready) return "";
   return `<button class="danger-button" type="button" data-delete-custom-model="${escapeHtml(model.key)}" data-model-type="${type}">删除记录</button>`;
+}
+
+function renderTranslationGpuHint(runtime) {
+  const supportsGpu = Boolean(runtime?.supportsGpuOffload);
+  const runtimeVersion = runtime?.version ? ` ${runtime.version}` : "";
+  const layers = Number(runtime?.nGpuLayers || 0);
+  const gpuIndex = Number(runtime?.translationGpuIndex || 0);
+  const usingGpu = runtime?.mode === "gpu";
+  const text = usingGpu
+    ? `当前 GGUF 运行库 llama-cpp-python${runtimeVersion} 会按直播默认设置尝试使用 GPU ${gpuIndex}，offload ${layers} 层；加载失败会退回 CPU。`
+    : supportsGpu
+      ? `当前 GGUF 运行库 llama-cpp-python${runtimeVersion} 是 CUDA 版，但直播默认 GPU 层数为 0，所以现在按 CPU 跑；要启用 GPU，请到直播高级参数设置 10-20 层试起。`
+      : `当前 GGUF 运行库${runtime?.available ? ` llama-cpp-python${runtimeVersion}` : ""}是 CPU 版或不可用；GGUF 翻译 GPU 层数请保持 0。`;
+  if (translationGpuHint) translationGpuHint.textContent = text;
+  if (liveTranslationGpuHint) {
+    liveTranslationGpuHint.textContent = usingGpu
+      ? `直播默认翻译会尝试使用 GGUF GPU offload：GPU ${gpuIndex}，${layers} 层；如果显存不够会退回 CPU，卡顿时先降层数。`
+      : supportsGpu
+        ? `直播默认翻译当前按 CPU 跑；GGUF 运行库是 CUDA 版，可在高级设备参数里把 GPU 层数设为 10-20 试起。`
+        : `直播默认翻译当前按 CPU 跑；GGUF 运行库是 CPU 版或不可用，GPU 层数请保持 0。`;
+  }
 }
 
 async function refreshLiveDefaults(force = false) {
@@ -262,33 +311,50 @@ async function refreshLiveConnections() {
 }
 
 function renderLiveConnections(connections) {
+  latestLiveConnections = Array.isArray(connections) ? connections : [];
   const openDetails = new Set(
     [...liveConnectionList.querySelectorAll(".connection details[open]")]
       .map((details) => details.closest(".connection")?.dataset.connectionId)
       .filter(Boolean),
   );
   liveConnectionList.innerHTML = "";
-  if (!connections.length) {
+  if (!latestLiveConnections.length) {
     liveConnectionList.innerHTML = `<div class="tile"><strong>暂无直播连接</strong><div class="meta">WebSocket 连接建立后会出现在这里。</div></div>`;
     return;
   }
-  for (const connection of connections) {
+  for (const connection of latestLiveConnections) {
     const mode = connection.translationEnabled ? "双语字幕" : "只转写";
     const title = `${mode} · ${String(connection.id || "").slice(0, 8)}`;
     const device = `${connection.device || "auto"}:${connection.deviceIndex ?? 0} · ${connection.computeType || "auto"}`;
     const translationGpu = connection.translationEnabled
       ? ` · 翻译 GPU ${connection.translationGpuIndex ?? 0} · GPU 层 ${connection.nGpuLayers ?? 0}`
       : "";
+    const runtimeLine = renderConnectionRuntime(connection);
     const recentTexts = renderRecentConnectionTexts(connection.recentTexts || []);
+    const processingLogs = renderLiveProcessingLogs(connection.processingLogs || []);
     const isOpen = openDetails.has(connection.id) ? " open" : "";
+    const isDisconnecting =
+      disconnectingLiveConnections.has(connection.id) || connection.lastEvent === "disconnect_requested";
+    const disconnectLabel = isDisconnecting ? "断开中" : "断开连接";
+    const disconnectButton = connection.id
+      ? `<button class="danger-button" type="button" data-disconnect-live="${escapeHtml(connection.id)}"${isDisconnecting ? " disabled" : ""}>${disconnectLabel}</button>`
+      : "";
+    const processing = renderLiveProcessing(connection);
     liveConnectionList.insertAdjacentHTML(
       "beforeend",
       `<article class="connection" data-connection-id="${escapeHtml(connection.id || "")}">
-        <div>
-          <strong>${escapeHtml(title)}</strong>
-          <div class="meta">IP ${escapeHtml(connection.clientIp || "-")} · 已连接 ${escapeHtml(fmtDuration(connection.connectedSeconds))} · 空闲 ${escapeHtml(fmtDuration(connection.idleSeconds))}</div>
-          <div class="meta">ASR ${escapeHtml(connection.asrModel || "-")} · ${escapeHtml(device)}${escapeHtml(translationGpu)}</div>
+        <div class="connection-head">
+          <div>
+            <strong>${escapeHtml(title)}</strong>
+            <div class="meta">IP ${escapeHtml(connection.clientIp || "-")} · 已连接 ${escapeHtml(fmtDuration(connection.connectedSeconds))} · 空闲 ${escapeHtml(fmtDuration(connection.idleSeconds))}</div>
+            <div class="meta">ASR ${escapeHtml(connection.asrModel || "-")} · ${escapeHtml(device)}${escapeHtml(translationGpu)}</div>
+            <div class="meta">${runtimeLine}</div>
+            ${connection.disconnectReason ? `<div class="meta bad">断开原因：${escapeHtml(connection.disconnectReason)}</div>` : ""}
+          </div>
+          <div class="connection-actions">${disconnectButton}</div>
         </div>
+        ${processing}
+        ${processingLogs}
         ${recentTexts}
         <details${isOpen}>
           <summary>查看详情</summary>
@@ -306,6 +372,97 @@ function renderLiveConnections(connections) {
       </article>`,
     );
   }
+}
+
+function runtimeModeLabel(runtime, kind) {
+  if (!runtime) return `${kind} -`;
+  if (runtime.mode === "gpu") {
+    const gpuIndex = runtime.deviceIndex ?? runtime.translationGpuIndex ?? 0;
+    const layers = runtime.nGpuLayers ? ` · ${runtime.nGpuLayers} 层` : "";
+    return `${kind} GPU ${gpuIndex}${layers}`;
+  }
+  const fallback = runtime.fallback ? "（GPU 加载失败，已退回）" : "";
+  return `${kind} CPU${fallback}`;
+}
+
+function renderConnectionRuntime(connection) {
+  const asrRuntime = connection.asrRuntime || {
+    mode: connection.device === "cuda" ? "gpu" : "cpu",
+    deviceIndex: connection.deviceIndex ?? 0,
+  };
+  const translationRuntime = connection.translationEnabled
+    ? connection.translationRuntime || {
+        mode: (connection.nGpuLayers || 0) > 0 ? "gpu" : "cpu",
+        translationGpuIndex: connection.translationGpuIndex ?? 0,
+        nGpuLayers: connection.nGpuLayers ?? 0,
+      }
+    : null;
+  const parts = [`运行：${runtimeModeLabel(asrRuntime, "转写")}`];
+  if (connection.translationEnabled) {
+    parts.push(runtimeModeLabel(translationRuntime, "翻译"));
+  }
+  return escapeHtml(parts.join(" · "));
+}
+
+function renderLiveProcessing(connection) {
+  const current = connection.currentProcessing;
+  const pending = connection.pendingUtterances || [];
+  const last = connection.lastProcessed;
+  const queueText = `${connection.queuedSegments || 0} 段待完成`;
+  if (!current && !pending.length && !last) {
+    return `<div class="processing-state idle"><strong>处理状态</strong><span>等待音频 · ${escapeHtml(queueText)}</span></div>`;
+  }
+
+  const currentBlock = current
+    ? `<div class="processing-main">
+        <strong>当前处理 #${escapeHtml(current.sequence || "-")} · ${escapeHtml(current.message || "正在处理")}</strong>
+        <span>${escapeHtml(fmtDuration(current.duration || 0))} 音频${current.startedAt ? ` · 已处理 ${escapeHtml(fmtAge(current.startedAt))}` : ""}${current.progress != null ? ` · ${escapeHtml(Math.round(Number(current.progress) * 100))}%` : ""}</span>
+      </div>`
+    : `<div class="processing-main">
+        <strong>当前处理 · 空闲</strong>
+        <span>${escapeHtml(queueText)}</span>
+      </div>`;
+  const pendingItems = pending.slice(0, 4).map((item) => {
+    const waited = item.queuedAt ? ` · 等待 ${escapeHtml(fmtAge(item.queuedAt))}` : "";
+    return `<span>#${escapeHtml(item.sequence || "-")} ${escapeHtml(fmtDuration(item.duration || 0))}${waited}</span>`;
+  }).join("");
+  const pendingBlock = pending.length
+    ? `<div class="processing-pending"><span>排队 ${escapeHtml(pending.length)} 段</span>${pendingItems}</div>`
+    : "";
+  const lastBlock = last && !current
+    ? `<div class="processing-last">最近完成 #${escapeHtml(last.sequence || "-")} · ${escapeHtml(last.message || "-")}${last.finishedAt ? ` · ${escapeHtml(fmtTime(last.finishedAt))}` : ""}</div>`
+    : "";
+  return `<div class="processing-state">${currentBlock}${pendingBlock}${lastBlock}</div>`;
+}
+
+function renderLiveProcessingLogs(logs) {
+  if (!logs.length) {
+    return "";
+  }
+  const items = [...logs]
+    .reverse()
+    .slice(0, 6)
+    .map((item) => {
+      const sequence = item.sequence != null ? `#${escapeHtml(item.sequence)} · ` : "";
+      const progress = item.progress != null ? ` · ${escapeHtml(Math.round(Number(item.progress) * 100))}%` : "";
+      const duration = item.duration != null ? ` · ${escapeHtml(fmtDuration(item.duration))} 音频` : "";
+      const sourceText = item.sourceText
+        ? `<span class="processing-log-text">${escapeHtml(item.sourceText)}</span>`
+        : "";
+      const errorText = item.error
+        ? `<span class="processing-log-text bad">${escapeHtml(item.error)}</span>`
+        : "";
+      return `<div class="processing-log ${escapeHtml(item.level || "info")}">
+        <span>${sequence}${escapeHtml(item.message || "-")}${duration}${progress}</span>
+        <time>${escapeHtml(fmtTime(item.at))}</time>
+        ${sourceText || errorText}
+      </div>`;
+    })
+    .join("");
+  return `<div class="processing-logs">
+    <strong>处理日志</strong>
+    ${items}
+  </div>`;
 }
 
 function renderRecentConnectionTexts(recentTexts) {
@@ -330,6 +487,26 @@ function renderRecentConnectionTexts(recentTexts) {
     })
     .join("");
   return `<div class="recent-texts">${items}</div>`;
+}
+
+async function disconnectLiveConnection(sessionId) {
+  if (!sessionId || disconnectingLiveConnections.has(sessionId)) return;
+  if (!confirm(`断开直播连接 ${sessionId.slice(0, 8)}？`)) return;
+  disconnectingLiveConnections.add(sessionId);
+  renderLiveConnections(latestLiveConnections);
+  try {
+    const response = await fetch(`/api/live/connections/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      throw new Error(result.detail || "断开失败");
+    }
+    await refreshLiveConnections();
+  } catch (error) {
+    alert(error instanceof Error ? error.message : "断开失败");
+  } finally {
+    disconnectingLiveConnections.delete(sessionId);
+    await refreshLiveConnections();
+  }
 }
 
 function connectLiveConnectionEvents() {
@@ -357,23 +534,16 @@ function syncAsrModelOptions(models) {
 }
 
 function syncAsrModelSelect(select, models, allowAutoSelect) {
+  const readyModels = models.filter((model) => model.ready);
   const selected = select.value || "large-v2";
-  removeStaleCustomOptions(select, models);
-  const existing = new Set([...select.options].map((option) => option.value));
-  for (const model of models) {
-    if (existing.has(model.key)) continue;
-    const option = document.createElement("option");
-    option.value = model.key;
-    option.textContent = model.nameCn || model.label;
-    select.appendChild(option);
-  }
-  const hasSelected = [...select.options].some((option) => option.value === selected);
+  setModelSelectOptions(select, readyModels, "暂无可用 ASR 模型");
+  const hasSelected = readyModels.some((model) => model.key === selected);
   if (hasSelected) {
     select.value = selected;
   }
 
-  const selectedModel = models.find((model) => model.key === select.value);
-  const readyCustomModel = models.find((model) => model.custom && model.ready);
+  const selectedModel = readyModels.find((model) => model.key === select.value);
+  const readyCustomModel = readyModels.find((model) => model.custom);
   if (allowAutoSelect && !autoSelectedModel && readyCustomModel && (!selectedModel || !selectedModel.ready)) {
     autoSelectedModel = true;
     select.value = readyCustomModel.key;
@@ -381,38 +551,47 @@ function syncAsrModelSelect(select, models, allowAutoSelect) {
   }
 }
 
-function syncTranslationModelOptions(models) {
-  if (!translationTestForm) return;
-  const select = translationTestForm.elements.translation_model;
-  const selected = select.value || "qwen2.5-1.5b-instruct-gguf";
-  removeStaleCustomOptions(select, models);
-  const existing = new Set([...select.options].map((option) => option.value));
+function setModelSelectOptions(select, models, emptyText) {
+  const previous = select.value;
+  select.innerHTML = "";
+  if (!models.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = emptyText;
+    option.disabled = true;
+    select.appendChild(option);
+    select.disabled = true;
+    return;
+  }
+
+  select.disabled = false;
   for (const model of models) {
-    if (existing.has(model.key)) continue;
     const option = document.createElement("option");
     option.value = model.key;
     option.textContent = model.nameCn || model.label;
     select.appendChild(option);
   }
-  const hasSelected = [...select.options].some((option) => option.value === selected);
+  if (models.some((model) => model.key === previous)) {
+    select.value = previous;
+  }
+}
+
+function syncTranslationModelOptions(models) {
+  if (!translationTestForm) return;
+  const select = translationTestForm.elements.translation_model;
+  const readyModels = models.filter((model) => model.ready);
+  const selected = select.value || "qwen2.5-1.5b-instruct-gguf";
+  setModelSelectOptions(select, readyModels, "暂无可用翻译模型");
+  const hasSelected = readyModels.some((model) => model.key === selected);
   if (hasSelected) {
     select.value = selected;
   }
 
-  const selectedModel = models.find((model) => model.key === select.value);
-  const readyModel = models.find((model) => model.ready);
+  const selectedModel = readyModels.find((model) => model.key === select.value);
+  const readyModel = readyModels[0];
   if (!autoSelectedTranslationModel && readyModel && (!selectedModel || !selectedModel.ready)) {
     autoSelectedTranslationModel = true;
     select.value = readyModel.key;
-  }
-}
-
-function removeStaleCustomOptions(select, models) {
-  const available = new Set(models.map((model) => model.key));
-  for (const option of [...select.options]) {
-    if (option.value.startsWith("custom:") && !available.has(option.value)) {
-      option.remove();
-    }
   }
 }
 
@@ -453,15 +632,101 @@ function renderChecks(target, checks) {
   }
 }
 
+function renderCudaRecommendation(cuda) {
+  if (!cudaRecommendation) return;
+  const available = Boolean(cuda?.available);
+  const statusText = available ? "CUDA 已可用" : "推荐启用 CUDA";
+  const detail = cuda?.detail || "安装 NVIDIA CUDA 12 后，ASR 可使用 GPU 加速；未配置时会继续使用 CPU。";
+  const restartHint = " 安装或更新 CUDA 后需要在设置里重启后端；直播标签内 ASR 设备请选择 auto 或 cuda。";
+  const runtimeHint = available
+    ? restartHint
+    : ` 本程序当前需要 CUDA 12 运行库；CUDA 13 不能替代缺失的 cublas64_12.dll。${restartHint}`;
+  const action = available
+    ? ""
+    : `<a class="action-link" href="${escapeHtml(cuda?.downloadUrl || "https://developer.nvidia.com/cuda-12-6-3-download-archive")}" target="_blank" rel="noreferrer">下载 CUDA 12</a>`;
+  cudaRecommendation.innerHTML = `<div class="cuda-recommendation-main">
+      <div>
+        <strong>${escapeHtml(statusText)}</strong>
+        <div class="meta">${escapeHtml(detail + runtimeHint)}</div>
+      </div>
+      ${action}
+    </div>`;
+  cudaRecommendation.className = `cuda-recommendation ${available ? "ready" : "pending"}`;
+}
+
+async function refreshVersion() {
+  const response = await fetch("/api/version");
+  const info = await response.json();
+  renderVersion(info);
+}
+
+function renderVersion(info) {
+  const packaged = Boolean(info?.packaged);
+  if (versionRuntimeBadge) {
+    versionRuntimeBadge.textContent = packaged ? "打包运行" : "源码运行";
+    versionRuntimeBadge.className = `ready-badge ${packaged ? "ready" : "pending"}`;
+  }
+  if (appVersionValue) appVersionValue.textContent = info?.version || "-";
+  if (appRuntimeValue) appRuntimeValue.textContent = packaged ? "便携版/安装包" : "源码目录";
+  if (appBuildTimeValue) appBuildTimeValue.textContent = fmtIsoTime(info?.executableModifiedAt);
+  if (appExecutableValue) appExecutableValue.textContent = `程序路径：${info?.executable || "-"}`;
+}
+
+async function waitForBackendReady() {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    await wait(1000);
+    try {
+      const response = await fetch(`/api/version?restartCheck=${Date.now()}`, { cache: "no-store" });
+      if (response.ok) {
+        await refreshAll();
+        return true;
+      }
+    } catch {
+      // The server is expected to be unavailable for a moment while restarting.
+    }
+  }
+  return false;
+}
+
+async function restartBackend() {
+  if (!restartBackendBtn || !restartBackendResult) return;
+  if (!confirm("重启后端会断开当前直播连接，确定现在重启？")) return;
+  restartBackendBtn.disabled = true;
+  restartBackendResult.textContent = "正在请求重启...";
+  restartBackendResult.className = "form-result";
+  try {
+    const response = await fetch("/api/restart", { method: "POST" });
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      throw new Error(result.detail || "重启请求失败");
+    }
+    restartBackendResult.textContent = "后端正在重启，页面会自动刷新状态...";
+    const ready = await waitForBackendReady();
+    restartBackendResult.textContent = ready
+      ? "后端已重启。请到直播标签确认 ASR 设备为 auto 或 cuda，并让电视端重新连接。"
+      : "已发送重启请求，但暂时没有等到后端恢复；请稍后手动刷新页面。";
+  } catch (error) {
+    restartBackendResult.textContent = error instanceof Error ? error.message : "重启请求失败";
+  } finally {
+    restartBackendBtn.disabled = false;
+  }
+}
+
 async function refreshTasks() {
-  const response = await fetch("/api/tasks");
-  const tasks = await response.json();
-  renderTaskList(taskList, tasks.filter((task) => task.kind === "transcribe"), "开始转写后会显示在这里。");
-  renderTaskList(
-    translationTaskList,
-    tasks.filter((task) => task.kind === "translate-test"),
-    "开始翻译测试后会显示在这里。",
-  );
+  if (taskRefreshInFlight) return;
+  taskRefreshInFlight = true;
+  try {
+    const response = await fetch("/api/tasks");
+    const tasks = await response.json();
+    renderTaskList(taskList, tasks.filter((task) => task.kind === "transcribe"), "开始转写后会显示在这里。");
+    renderTaskList(
+      translationTaskList,
+      tasks.filter((task) => task.kind === "translate-test"),
+      "开始翻译测试后会显示在这里。",
+    );
+  } finally {
+    taskRefreshInFlight = false;
+  }
 }
 
 async function refreshLogs() {
@@ -791,10 +1056,25 @@ function renderTaskList(target, tasks, emptyText) {
 async function refreshAll() {
   refreshBtn.disabled = true;
   try {
-    await Promise.all([refreshStatus(), refreshTasks(), refreshLogs(), refreshLiveDefaults(), refreshLiveConnections()]);
+    await Promise.all([
+      refreshStatus(),
+      refreshTasks(),
+      refreshLogs(),
+      refreshLiveDefaults(),
+      refreshLiveConnections(),
+      refreshVersion(),
+    ]);
   } finally {
     refreshBtn.disabled = false;
   }
+}
+
+function startTaskAutoRefresh() {
+  if (refreshTimer) return;
+  refreshTimer = setInterval(() => {
+    if (document.hidden) return;
+    refreshTasks();
+  }, 1500);
 }
 
 function renderCachedLogs() {
@@ -888,6 +1168,17 @@ validateModelBtn.addEventListener("click", validateCustomModelPath);
 validateTranslationModelBtn.addEventListener("click", validateCustomTranslationModelPath);
 liveDefaultsForm.addEventListener("submit", saveLiveDefaults);
 refreshConnectionsBtn.addEventListener("click", refreshLiveConnections);
+restartBackendBtn?.addEventListener("click", restartBackend);
+liveConnectionList.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-disconnect-live]");
+  if (!button) return;
+  button.disabled = true;
+  try {
+    await disconnectLiveConnection(button.dataset.disconnectLive);
+  } finally {
+    button.disabled = false;
+  }
+});
 for (const list of [modelList, translationModelList]) {
   list.addEventListener("click", async (event) => {
     const button = event.target.closest("[data-delete-custom-model]");
@@ -978,6 +1269,7 @@ jobForm.addEventListener("submit", async (event) => {
   jobForm.elements.device.value = selectedDevice;
   jobForm.elements.device_index.value = selectedDeviceIndex;
   jobForm.elements.compute_type.value = selectedComputeType;
+  await refreshTasks();
   await refreshAll();
 });
 
@@ -1011,12 +1303,14 @@ translationTestForm.addEventListener("submit", async (event) => {
   translationTestForm.elements.compute_type.value = selectedComputeType;
   translationTestForm.elements.n_gpu_layers.value = selectedGpuLayers;
   translationTestForm.elements.translation_gpu_index.value = selectedTranslationGpuIndex;
+  await refreshTasks();
   await refreshAll();
 });
 
 refreshBtn.addEventListener("click", refreshAll);
 connectLiveConnectionEvents();
 syncAutoRefresh();
+startTaskAutoRefresh();
 document.querySelectorAll("[data-tab]").forEach((button) => {
   button.addEventListener("click", () => {
     document.querySelectorAll("[data-tab]").forEach((item) => item.classList.remove("active"));
