@@ -68,19 +68,8 @@ function Find-CudaDll([string]$dllName) {
 
 function New-GgufCudaDlc {
     Write-Host "[3/5] Preparing optional GGUF CUDA DLC..." -ForegroundColor Yellow
-    $dlcReadme = @"
-TV Captioner Backend GGUF CUDA DLC
-
-这个文件夹是可选的 GPU 加速包，里面包含转写 CUDA 加速和 GGUF 翻译 GPU offload 需要的运行库文件。
-
-安装方法：
-1. 先下载并解压普通版 TVCaptionerBackend。
-2. 把本文件夹里的 gguf-cuda-dlc 目录复制到普通版 TVCaptionerBackend 目录下。
-3. 以后更新普通版时，保留这个 gguf-cuda-dlc 目录即可，不需要每次重新下载 DLC。
-4. 启动 TVCaptionerBackend.exe。转写 CUDA 会自动尝试使用 DLC 里的运行库；只有界面显示 GGUF GPU offload 可用时，才需要到“直播 > 高级设备参数”里设置 GGUF 翻译 GPU 层数。
-
-不安装这个 DLC，普通版也可以正常运行；缺少 CUDA 运行库时，转写和 GGUF 翻译会使用 CPU。
-"@
+    $dlcReadmeBase64 = "VFYgQ2FwdGlvbmVyIEJhY2tlbmQgR0dVRiBDVURBIERMQwoK6L+Z5Liq5paH5Lu25aS55piv5Y+v6YCJ55qEIEdQVSDliqDpgJ/ljIXvvIzph4zpnaLljIXlkKvovazlhpkgQ1VEQSDliqDpgJ/lkowgR0dVRiDnv7vor5EgR1BVIG9mZmxvYWQg6ZyA6KaB55qE6L+Q6KGM5bqT5paH5Lu244CCCgrlronoo4Xmlrnms5XvvJoKMS4g5YWI5LiL6L295bm26Kej5Y6L5pmu6YCa54mIIFRWQ2FwdGlvbmVyQmFja2VuZOOAggoyLiDmiormnKzmlofku7blpLnph4znmoQgZ2d1Zi1jdWRhLWRsYyDnm67lvZXlpI3liLbliLDmma7pgJrniYggVFZDYXB0aW9uZXJCYWNrZW5kIOebruW9leS4i+OAggozLiDku6XlkI7mm7TmlrDmma7pgJrniYjml7bvvIzkv53nlZnov5nkuKogZ2d1Zi1jdWRhLWRsYyDnm67lvZXljbPlj6/vvIzkuI3pnIDopoHmr4/mrKHph43mlrDkuIvovb0gRExD44CCCjQuIOWQr+WKqCBUVkNhcHRpb25lckJhY2tlbmQuZXhl44CC6L2s5YaZIENVREEg5Lya6Ieq5Yqo5bCd6K+V5L2/55SoIERMQyDph4znmoTov5DooYzlupPvvJvlj6rmnInnlYzpnaLmmL7npLogR0dVRiBHUFUgb2ZmbG9hZCDlj6/nlKjml7bvvIzmiY3pnIDopoHliLDigJznm7Tmkq0gPiDpq5jnuqforr7lpIflj4LmlbDigJ3ph4zorr7nva4gR0dVRiDnv7vor5EgR1BVIOWxguaVsOOAggoK5LiN5a6J6KOF6L+Z5LiqIERMQ++8jOaZrumAmueJiOS5n+WPr+S7peato+W4uOi/kOihjO+8m+e8uuWwkSBDVURBIOi/kOihjOW6k+aXtu+8jOi9rOWGmeWSjCBHR1VGIOe/u+ivkeS8muS9v+eUqCBDUFXjgII="
+    $dlcReadme = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($dlcReadmeBase64))
 
     $requiredDlcFiles = @(
         "_internal\llama_cpp\lib\ggml-cuda.dll",
