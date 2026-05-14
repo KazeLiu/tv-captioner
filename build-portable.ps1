@@ -71,15 +71,15 @@ function New-GgufCudaDlc {
     $dlcReadme = @"
 TV Captioner Backend GGUF CUDA DLC
 
-This folder contains optional CUDA runtime files for ASR GPU acceleration and GGUF translation GPU offload.
+这个文件夹是可选的 GPU 加速包，里面包含转写 CUDA 加速和 GGUF 翻译 GPU offload 需要的运行库文件。
 
-How to install:
-1. Download and extract the base TVCaptionerBackend package.
-2. Copy this folder's gguf-cuda-dlc directory into the TVCaptionerBackend folder.
-3. Keep gguf-cuda-dlc there when updating the base package.
-4. Start TVCaptionerBackend.exe. ASR CUDA can use this DLC automatically; set GGUF translation GPU layers in the Live tab only when GGUF GPU offload is shown as available.
+安装方法：
+1. 先下载并解压普通版 TVCaptionerBackend。
+2. 把本文件夹里的 gguf-cuda-dlc 目录复制到普通版 TVCaptionerBackend 目录下。
+3. 以后更新普通版时，保留这个 gguf-cuda-dlc 目录即可，不需要每次重新下载 DLC。
+4. 启动 TVCaptionerBackend.exe。转写 CUDA 会自动尝试使用 DLC 里的运行库；只有界面显示 GGUF GPU offload 可用时，才需要到“直播 > 高级设备参数”里设置 GGUF 翻译 GPU 层数。
 
-Without this DLC, the base package still works and falls back to CPU when CUDA runtime DLLs are unavailable.
+不安装这个 DLC，普通版也可以正常运行；缺少 CUDA 运行库时，转写和 GGUF 翻译会使用 CPU。
 "@
 
     $requiredDlcFiles = @(
