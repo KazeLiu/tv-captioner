@@ -125,15 +125,42 @@ def _is_cuda_runtime_error(exc: Exception) -> bool:
 
 
 def _load_cpu_model(model_path: Path, compute_type: str, device_index: int) -> WhisperModel:
-    cpu_key = (str(model_path), "cpu", compute_type, device_index)
-    if cpu_key not in _MODEL_CACHE:
-        _MODEL_CACHE[cpu_key] = WhisperModel(
-            str(model_path),
-            device="cpu",
-            device_index=device_index,
-            compute_type=compute_type,
-        )
-    return _MODEL_CACHE[cpu_key]
+    with _MODEL_CACHE_LOCK:
+        cpu_key = (str(model_path), "cpu", compute_type, device_index)
+        if cpu_key not in _MODEL_CACHE:
+            _MODEL_CACHE[cpu_key] = WhisperModel(
+                str(model_path),
+                device="cpu",
+                device_index=device_index,
+                compute_type=compute_type,
+            )
+        return _MODEL_CACHE[cpu_key]
+
+
+def _log_asr_cuda_fallback(
+    *,
+    requested_device: str,
+    device_index: int,
+    compute_type: str,
+    error: Exception,
+    stage: str,
+) -> None:
+    log_event(
+        "warning",
+        "ASR CUDA 运行失败，已退回 CPU",
+        category="asr",
+        details={
+            "stage": stage,
+            "requestedDevice": requested_device,
+            "deviceIndex": device_index,
+            "computeType": compute_type,
+            "error": str(error),
+            "hint": (
+                "如需转写 CUDA 加速，请安装 CUDA 12 运行库，"
+                "或把 GGUF CUDA DLC 放到后端目录。"
+            ),
+        },
+    )
 
 
 def asr_runtime_status(device: str, device_index: int, compute_type: str) -> dict[str, Any]:
@@ -171,20 +198,12 @@ def _model(model_path: Path, device: str, compute_type: str, device_index: int) 
                 )
             except Exception as exc:
                 if resolved_device == "cuda" and _is_cuda_runtime_error(exc):
-                    log_event(
-                        "warning",
-                        "ASR CUDA 加载失败，已退回 CPU",
-                        category="asr",
-                        details={
-                            "requestedDevice": requested_device,
-                            "deviceIndex": device_index,
-                            "computeType": compute_type,
-                            "error": str(exc),
-                            "hint": (
-                                "如需转写 CUDA 加速，请安装 CUDA 12 运行库，"
-                                "或把 GGUF CUDA DLC 放到后端目录。"
-                            ),
-                        },
+                    _log_asr_cuda_fallback(
+                        requested_device=requested_device,
+                        device_index=device_index,
+                        compute_type=compute_type,
+                        error=exc,
+                        stage="load_model",
                     )
                     return _load_cpu_model(model_path, compute_type, device_index), "cpu"
                 raise
@@ -249,6 +268,7 @@ def _transcribe(
     vad_filter: bool = True,
     condition_on_previous_text: bool = True,
 ) -> dict[str, Any]:
+    requested_device = (device or "auto").strip().lower()
     update(message="Loading ASR model", progress=0.01)
     whisper, runtime_device = _model(
         model_path,
@@ -268,22 +288,42 @@ def _transcribe(
     if initial_prompt:
         kwargs["initial_prompt"] = initial_prompt
 
-    update(message="Transcribing media", progress=0.05)
-    segments_iter, info = whisper.transcribe(str(audio) if isinstance(audio, Path) else audio, **kwargs)
+    def run_transcribe(model: WhisperModel, active_device: str) -> tuple[Any, list[dict[str, Any]], str]:
+        update(message="Transcribing media", progress=0.05)
+        segments_iter, info = model.transcribe(str(audio) if isinstance(audio, Path) else audio, **kwargs)
 
+        duration = info.duration or 0
+        segments: list[dict[str, Any]] = []
+        for segment in segments_iter:
+            segments.append(
+                {
+                    "id": segment.id,
+                    "start": float(segment.start),
+                    "end": float(segment.end),
+                    "text": segment.text.strip(),
+                }
+            )
+            if duration and math.isfinite(duration):
+                update(progress=min(0.95, max(0.05, segment.end / duration)), message="Transcribing media")
+        return info, segments, active_device
+
+    try:
+        info, segments, runtime_device = run_transcribe(whisper, runtime_device)
+    except Exception as exc:
+        if runtime_device == "cuda" and _is_cuda_runtime_error(exc):
+            _log_asr_cuda_fallback(
+                requested_device=requested_device,
+                device_index=device_index,
+                compute_type=compute_type,
+                error=exc,
+                stage="transcribe",
+            )
+            update(message="ASR CUDA failed; retrying on CPU", progress=0.03)
+            cpu_model = _load_cpu_model(model_path, compute_type, device_index)
+            info, segments, runtime_device = run_transcribe(cpu_model, "cpu")
+        else:
+            raise
     duration = info.duration or 0
-    segments: list[dict[str, Any]] = []
-    for segment in segments_iter:
-        segments.append(
-            {
-                "id": segment.id,
-                "start": float(segment.start),
-                "end": float(segment.end),
-                "text": segment.text.strip(),
-            }
-        )
-        if duration and math.isfinite(duration):
-            update(progress=min(0.95, max(0.05, segment.end / duration)), message="Transcribing media")
 
     return {
         "language": info.language,
