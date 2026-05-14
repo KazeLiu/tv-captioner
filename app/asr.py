@@ -12,6 +12,8 @@ import ctranslate2
 import numpy as np
 from faster_whisper import WhisperModel
 
+from .logs import log_event
+
 
 _MODEL_CACHE: dict[tuple[str, str, str, int], WhisperModel] = {}
 _MODEL_CACHE_LOCK = threading.RLock()
@@ -119,6 +121,18 @@ def _is_cuda_runtime_error(exc: Exception) -> bool:
     return any(token in message for token in ("cublas", "cudnn", "cuda"))
 
 
+def _load_cpu_model(model_path: Path, compute_type: str, device_index: int) -> WhisperModel:
+    cpu_key = (str(model_path), "cpu", compute_type, device_index)
+    if cpu_key not in _MODEL_CACHE:
+        _MODEL_CACHE[cpu_key] = WhisperModel(
+            str(model_path),
+            device="cpu",
+            device_index=device_index,
+            compute_type=compute_type,
+        )
+    return _MODEL_CACHE[cpu_key]
+
+
 def asr_runtime_status(device: str, device_index: int, compute_type: str) -> dict[str, Any]:
     requested_device = (device or "auto").strip().lower()
     resolved_device = _resolve_asr_device(requested_device)
@@ -153,22 +167,23 @@ def _model(model_path: Path, device: str, compute_type: str, device_index: int) 
                     compute_type=compute_type,
                 )
             except Exception as exc:
-                if requested_device == "auto" and resolved_device == "cuda" and _is_cuda_runtime_error(exc):
-                    cpu_key = (str(model_path), "cpu", compute_type, device_index)
-                    if cpu_key not in _MODEL_CACHE:
-                        _MODEL_CACHE[cpu_key] = WhisperModel(
-                            str(model_path),
-                            device="cpu",
-                            device_index=device_index,
-                            compute_type=compute_type,
-                        )
-                    return _MODEL_CACHE[cpu_key], "cpu"
                 if resolved_device == "cuda" and _is_cuda_runtime_error(exc):
-                    raise RuntimeError(
-                        "ASR CUDA runtime is unavailable. Switch ASR device to cpu, "
-                        "or install CUDA 12/cuDNN runtime DLLs such as cublas64_12.dll "
-                        "and make sure they are on PATH."
-                    ) from exc
+                    log_event(
+                        "warning",
+                        "ASR CUDA 加载失败，已退回 CPU",
+                        category="asr",
+                        details={
+                            "requestedDevice": requested_device,
+                            "deviceIndex": device_index,
+                            "computeType": compute_type,
+                            "error": str(exc),
+                            "hint": (
+                                "如需转写 CUDA 加速，请安装 CUDA 12 运行库，"
+                                "或把 GGUF CUDA DLC 放到后端目录。"
+                            ),
+                        },
+                    )
+                    return _load_cpu_model(model_path, compute_type, device_index), "cpu"
                 raise
         return _MODEL_CACHE[key], resolved_device
 
