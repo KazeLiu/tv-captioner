@@ -5,9 +5,12 @@ import sys
 import threading
 import time
 import webbrowser
+import ctypes
 from pathlib import Path
 
 import uvicorn
+
+_DLC_DLL_HANDLES: list[ctypes.WinDLL] = []
 
 
 def runtime_dir() -> Path:
@@ -58,6 +61,23 @@ def configure_optional_gguf_cuda_dlc(root: Path) -> None:
     for dll_dir in dll_dirs:
         if dll_dir.exists():
             os.add_dll_directory(str(dll_dir))
+    path_entries = [str(dll_dir) for dll_dir in dll_dirs if dll_dir.exists()]
+    existing_path = os.environ.get("PATH", "")
+    os.environ["PATH"] = os.pathsep.join([*path_entries, existing_path]) if path_entries else existing_path
+
+    dlls_to_preload = [
+        dlc_internal / "cudart64_12.dll",
+        dlc_internal / "cublasLt64_12.dll",
+        dlc_internal / "cublas64_12.dll",
+        dlc_internal / "llama_cpp" / "lib" / "ggml-cuda.dll",
+    ]
+    for dll_path in dlls_to_preload:
+        if not dll_path.exists():
+            continue
+        try:
+            _DLC_DLL_HANDLES.append(ctypes.WinDLL(str(dll_path)))
+        except OSError as exc:
+            print(f"可选 GPU DLC 运行库预加载失败：{dll_path.name}: {exc}")
 
 
 if __name__ == "__main__":

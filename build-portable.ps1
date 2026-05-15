@@ -21,6 +21,7 @@ $gpuDlcPayloadDir = Join-Path $gpuDlcDir "gguf-cuda-dlc"
 $llamaCpuWheel = "https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.23/llama_cpp_python-0.3.23-py3-none-win_amd64.whl"
 $llamaCudaWheel = "https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.23-cu124/llama_cpp_python-0.3.23-py3-none-win_amd64.whl"
 $gpuDlcFiles = @(
+    "_internal\cudart64_12.dll",
     "_internal\cublas64_12.dll",
     "_internal\cublasLt64_12.dll"
 )
@@ -73,6 +74,7 @@ function New-GgufCudaDlc {
 
     $requiredDlcFiles = @(
         "_internal\llama_cpp\lib\ggml-cuda.dll",
+        "_internal\cudart64_12.dll",
         "_internal\cublas64_12.dll",
         "_internal\cublasLt64_12.dll"
     )
