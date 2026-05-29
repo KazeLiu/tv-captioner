@@ -162,6 +162,10 @@ p {
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 }
 
+#modelList {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .tile,
 .model,
 .task,
@@ -225,6 +229,15 @@ p {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
+}
+
+#modelList .model {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+}
+
+#modelList .model-actions {
+  justify-content: flex-start;
 }
 
 .cuda-recommendation {
@@ -728,6 +741,7 @@ textarea {
 }
 
 @media (max-width: 680px) {
+  #modelList,
   .topbar,
   .model,
   .cuda-recommendation-main,
